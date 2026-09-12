@@ -276,7 +276,7 @@ fn same_worktree(a: &Path, b: &Path) -> bool {
 }
 
 /// Release port blocks whose worktree no longer exists, stop the processes they
-/// left running, and report compose resources still labelled for them.
+/// left running, and reclaim compose resources of worktrees that are gone.
 pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<()> {
     // A checkout whose directory is gone is dead even when git still lists it,
     // because nothing can be running there. `--prune` clears the registration.
@@ -286,27 +286,48 @@ pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<
         .filter(|entry| entry.path.exists())
         .map(|entry| entry.path)
         .collect();
+    gc_scoped(paths, &repo.key(), &live, timeout, apply)
+}
 
+/// `gc` for every repository the state dir holds a record of.
+///
+/// A repository-scoped sweep needs the repository, so it cannot reach the case
+/// that matters most: the repository itself is gone, while its worktrees'
+/// processes, volumes and port blocks are still there. This walks the records
+/// instead. A checkout is live when its recorded path still exists, which is the
+/// same rule the repository-scoped sweep applies to git's list.
+pub fn gc_all(paths: &Paths, timeout: Duration, apply: bool) -> Result<()> {
+    for repo_key in recorded_repositories(paths) {
+        let live: Vec<PathBuf> = recorded_worktrees(paths, &repo_key)
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect();
+        gc_scoped(paths, &repo_key, &live, timeout, apply)?;
+    }
+    Ok(())
+}
+
+/// One repository's reclamation, given the checkouts that still exist.
+fn gc_scoped(
+    paths: &Paths,
+    repo_key: &str,
+    live: &[PathBuf],
+    timeout: Duration,
+    apply: bool,
+) -> Result<()> {
     let blocks = paths.blocks_dir();
     let mut released = 0usize;
     if blocks.exists() {
         for entry in std::fs::read_dir(&blocks)?.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(assignment) = serde_json::from_str::<Assignment>(&raw) else {
+            let Some(assignment) = read_assignment(&path) else {
                 continue;
             };
             // Blocks belong to a repository; leave other repositories alone.
-            if assignment.repo_key != repo.key() {
+            if assignment.repo_key != repo_key {
                 continue;
             }
-            let owner = assignment.worktree_path.clone();
-            let stale = match owner {
+            let stale = match assignment.worktree_path.clone() {
                 Some(owner) => {
                     let owner = PathBuf::from(owner);
                     !live.iter().any(|path| same_worktree(path, &owner))
@@ -334,9 +355,66 @@ pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<
     if released == 0 {
         println!("no stale port blocks for this repository");
     }
-    let projects = sweep_worktree_state(paths, repo, &live, timeout, apply)?;
-    sweep_compose(&live, &repo.key(), &projects, apply)?;
+    let projects = sweep_worktree_state(paths, repo_key, live, timeout, apply)?;
+    sweep_compose(live, repo_key, &projects, apply)?;
     Ok(())
+}
+
+/// Repository keys the state dir holds blocks or worktree state for.
+fn recorded_repositories(paths: &Paths) -> Vec<String> {
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    if let Ok(entries) = std::fs::read_dir(paths.blocks_dir()) {
+        for entry in entries.flatten() {
+            if let Some(assignment) = read_assignment(&entry.path()) {
+                keys.insert(assignment.repo_key);
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(paths.worktrees_dir()) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                keys.insert(name.to_string());
+            }
+        }
+    }
+    keys.into_iter().collect()
+}
+
+/// Every checkout recorded for a repository, from its blocks and its state dirs.
+fn recorded_worktrees(paths: &Paths, repo_key: &str) -> Vec<PathBuf> {
+    let mut found: BTreeSet<PathBuf> = BTreeSet::new();
+    if let Ok(entries) = std::fs::read_dir(paths.blocks_dir()) {
+        for entry in entries.flatten() {
+            let Some(assignment) = read_assignment(&entry.path()) else {
+                continue;
+            };
+            if assignment.repo_key != repo_key {
+                continue;
+            }
+            if let Some(path) = assignment.worktree_path {
+                found.insert(PathBuf::from(path));
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(paths.worktrees_dir().join(repo_key)) {
+        for entry in entries.flatten() {
+            if let Some(owner) = state_owner(&entry.path()) {
+                found.insert(PathBuf::from(owner));
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+fn read_assignment(path: &Path) -> Option<Assignment> {
+    if path.extension().and_then(|value| value.to_str()) != Some("json") {
+        return None;
+    }
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<Assignment>(&raw).ok()
 }
 
 /// Stop the supervised processes of worktrees whose checkout is gone, then drop
@@ -350,12 +428,12 @@ pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<
 /// with its checkout and cannot be reclaimed — only reported as gone.
 fn sweep_worktree_state(
     paths: &Paths,
-    repo: &Repo,
+    repo_key: &str,
     live: &[PathBuf],
     timeout: Duration,
     apply: bool,
 ) -> Result<Vec<String>> {
-    let root = paths.worktrees_dir().join(repo.key());
+    let root = paths.worktrees_dir().join(repo_key);
     let mut projects = Vec::new();
     let mut stale = 0usize;
     if let Ok(entries) = std::fs::read_dir(&root) {
@@ -394,6 +472,12 @@ fn sweep_worktree_state(
     }
     if stale == 0 {
         println!("no stale worktree state for this repository");
+    }
+    // An empty repository directory would otherwise be read as a repository by
+    // the next `gc --all`. `remove_dir` refuses a non-empty one, so anything
+    // skipped above keeps its directory.
+    if apply {
+        let _ = std::fs::remove_dir(&root);
     }
     Ok(projects)
 }

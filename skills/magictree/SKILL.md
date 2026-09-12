@@ -109,6 +109,7 @@ magictree rm feat/billing --force   # discard uncommitted changes
 magictree gc                        # reclaim ports and compose resources of deleted worktrees
 magictree gc --dry-run              # report what gc would reclaim
 magictree gc --prune                # also drop git's record of deleted checkouts
+magictree gc --all                  # every repository the state dir knows, no checkout needed
 ```
 
 `new` places the checkout beside the primary checkout as `<repo>-<slug>`. `rm` accepts a

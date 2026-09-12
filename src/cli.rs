@@ -165,12 +165,13 @@ pub struct ListArgs {
 
 #[derive(Args)]
 pub struct GcArgs {
-    /// Only report what would be released.
-    #[arg(long)]
-    pub dry_run: bool,
     /// Also run `git worktree prune` for removed checkouts.
     #[arg(long)]
     pub prune: bool,
+    /// Sweep every repository the state dir holds a record of, including ones
+    /// whose repository is itself gone.
+    #[arg(long, conflicts_with_all = ["prune", "cwd"])]
+    pub all: bool,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 }
@@ -588,17 +589,16 @@ fn cmd_list(args: ListArgs) -> Result<()> {
 fn cmd_gc(args: GcArgs, dry_run: bool) -> Result<()> {
     let paths = Paths::new()?;
     let config = Config::load(&paths)?;
-    let repo = Repo::open(&resolve_cwd(args.cwd)?)?;
     let apply = !dry_run;
     if !apply {
         println!("dry run — nothing is released");
     }
-    worktrees::gc(
-        &paths,
-        &repo,
-        Duration::from_secs(config.stop_timeout_secs),
-        apply,
-    )?;
+    let timeout = Duration::from_secs(config.stop_timeout_secs);
+    if args.all {
+        return worktrees::gc_all(&paths, timeout, apply);
+    }
+    let repo = Repo::open(&resolve_cwd(args.cwd)?)?;
+    worktrees::gc(&paths, &repo, timeout, apply)?;
     if args.prune {
         worktrees::prune(&repo, !apply)?;
     }
