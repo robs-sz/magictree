@@ -4,3 +4,6 @@
 //! worktree identity, allocates ports, materialises environment, bootstraps the
 //! checkout, and supervises services.
 
+pub mod paths;
+pub mod repo;
+pub mod slug;
