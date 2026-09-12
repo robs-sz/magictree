@@ -5,6 +5,7 @@
 //! checkout, and supervises services.
 
 pub mod bootstrap;
+pub mod cli;
 pub mod compose;
 pub mod config;
 pub mod ctx;
@@ -21,3 +22,9 @@ pub mod repo;
 pub mod run;
 pub mod slug;
 pub mod worktrees;
+
+pub use cli::{dispatch, Cli};
+pub use config::Config;
+pub use ctx::Ctx;
+pub use paths::Paths;
+pub use repo::Repo;
