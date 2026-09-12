@@ -7,6 +7,7 @@
 pub mod bootstrap;
 pub mod compose;
 pub mod config;
+pub mod ctx;
 pub mod env;
 pub mod health;
 pub mod manifest;
@@ -15,3 +16,4 @@ pub mod ports;
 pub mod repo;
 pub mod run;
 pub mod slug;
+pub mod worktrees;
