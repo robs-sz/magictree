@@ -1,0 +1,128 @@
+use anyhow::{anyhow, Result};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvSource {
+    Computed,
+    Workspace,
+    App,
+}
+
+impl EnvSource {
+    pub fn label(&self) -> &'static str {
+        match self {
+            EnvSource::Computed => "computed",
+            EnvSource::Workspace => "workspace",
+            EnvSource::App => "app",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvPlan {
+    pub vars: BTreeMap<String, String>,
+    pub sources: BTreeMap<String, EnvSource>,
+}
+
+impl EnvPlan {
+    pub fn dotenv(&self) -> String {
+        let mut out = String::new();
+        for (key, value) in &self.vars {
+            out.push_str(&format!("{key}={}\n", quote(value)));
+        }
+        out
+    }
+
+    pub fn export(&self) -> String {
+        let mut out = String::new();
+        for (key, value) in &self.vars {
+            out.push_str(&format!("export {key}={}\n", quote(value)));
+        }
+        out
+    }
+
+    pub fn explain(&self) -> String {
+        let width = self.vars.keys().map(|key| key.len()).max().unwrap_or(0);
+        let mut out = String::new();
+        for (key, value) in &self.vars {
+            let source = self
+                .sources
+                .get(key)
+                .map(|source| source.label())
+                .unwrap_or("unknown");
+            out.push_str(&format!("{key:width$}  {source:<9}  {value}\n"));
+        }
+        out
+    }
+}
+
+/// Merge the environment layers. Computed values always win; app values
+/// override workspace values. Values may reference `${NAME}` from the
+/// computed layer or from values resolved earlier in this call.
+pub fn build(
+    computed: BTreeMap<String, String>,
+    workspace_env: &BTreeMap<String, String>,
+    app_env: &BTreeMap<String, String>,
+) -> Result<EnvPlan> {
+    let mut plan = EnvPlan {
+        vars: BTreeMap::new(),
+        sources: BTreeMap::new(),
+    };
+    for (key, value) in computed {
+        plan.sources.insert(key.clone(), EnvSource::Computed);
+        plan.vars.insert(key, value);
+    }
+    for (source, layer) in [
+        (EnvSource::Workspace, workspace_env),
+        (EnvSource::App, app_env),
+    ] {
+        for (key, raw) in layer {
+            if plan.sources.contains_key(key) && plan.sources[key] == EnvSource::Computed {
+                return Err(anyhow!(
+                    "environment key '{key}' is set by magictree and cannot be overridden"
+                ));
+            }
+            let value = interpolate(raw, &plan.vars)?;
+            plan.sources.insert(key.clone(), source);
+            plan.vars.insert(key.clone(), value);
+        }
+    }
+    Ok(plan)
+}
+
+fn interpolate(value: &str, resolved: &BTreeMap<String, String>) -> Result<String> {
+    let mut out = String::new();
+    let mut rest = value;
+    loop {
+        let Some(start) = rest.find("${") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            break;
+        };
+        let name = &after[..end];
+        let replacement = resolved.get(name).ok_or_else(|| {
+            anyhow!("unknown variable '${{{name}}}' in environment value '{value}'")
+        })?;
+        out.push_str(replacement);
+        rest = &after[end + 1..];
+    }
+    Ok(out)
+}
+
+fn quote(value: &str) -> String {
+    if value.is_empty() {
+        return "\"\"".to_string();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-_./:@,+=".contains(ch))
+    {
+        return value.to_string();
+    }
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
