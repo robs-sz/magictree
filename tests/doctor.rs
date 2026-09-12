@@ -205,3 +205,149 @@ port = { env = "PORT" }
         "an input that can never match means the cache never hits: {summaries:?}"
     );
 }
+
+/// A repository whose dev script pins the port it listens on, and whose
+/// manifest hands it a variable a compose service also claims.
+fn pinned_repo() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        r#"{"name":"app","packageManager":"npm@10","scripts":{"dev":"next dev --turbo -p 3005","seed":"tsx scripts/seed.ts --port 5433"}}"#,
+    );
+    fixture.write("package-lock.json", "{}");
+    fixture.write(
+        "compose.yaml",
+        "services:\n  db:\n    image: postgres:18\n    ports:\n      - \"5433:5432\"\n",
+    );
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+[app]
+id = "app"
+
+[[services]]
+id = "db"
+compose = { file = "compose.yaml", service = "db" }
+port = { env = "DATABASE_PORT", target = 5432, prefer = 5433 }
+
+[[services]]
+id = "app"
+target = { kind = "npm", script = "dev" }
+port = { env = "DATABASE_PORT" }
+health = { http = "/", timeout = 120 }
+"#,
+    );
+    fixture.git_repo();
+    fixture
+}
+
+fn findings(fixture: &Fixture) -> Vec<magictree::doctor::Drift> {
+    let report = extract(fixture.path()).expect("extract");
+    let loaded = Loaded::load(fixture.path()).expect("load");
+    compare(&report, &loaded)
+}
+
+#[test]
+fn a_service_that_pins_its_port_is_drift_with_the_rewrite() {
+    let fixture = pinned_repo();
+    let all = findings(&fixture);
+    let pinned = all
+        .iter()
+        .find(|entry| entry.summary.contains("pins port 3005"))
+        .expect("the pinned port must be reported");
+
+    assert!(
+        pinned.is_drift(),
+        "a pinned port breaks every later worktree"
+    );
+    assert!(
+        pinned.summary.contains("next dev --turbo -p 3005"),
+        "the finding must show the command: {}",
+        pinned.summary
+    );
+    let suggestion = pinned.suggestion.clone().unwrap_or_default();
+    assert!(
+        suggestion.contains("${APP_PORT:-3005}"),
+        "the fix must name a variable the app can own, not the db's: {suggestion}"
+    );
+    assert!(
+        suggestion.contains("'DATABASE_PORT' is also service 'db's"),
+        "the reason must be given: {suggestion}"
+    );
+}
+
+#[test]
+fn a_pinned_port_magictree_does_not_run_is_information() {
+    let fixture = pinned_repo();
+    let all = findings(&fixture);
+    let seed = all
+        .iter()
+        .find(|entry| entry.summary.contains("db:seed") || entry.summary.contains("'seed'"))
+        .expect("the seed script pins a port too");
+
+    assert!(
+        !seed.is_drift(),
+        "a script magictree never starts is not drift"
+    );
+    let suggestion = seed.suggestion.clone().unwrap_or_default();
+    assert!(
+        suggestion.contains("${DATABASE_PORT:-5433}"),
+        "a literal matching a declared port points at that service's variable: {suggestion}"
+    );
+}
+
+#[test]
+fn a_command_pinned_in_the_manifest_is_drift() {
+    let fixture = pinned_repo();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+[app]
+id = "app"
+
+[[services]]
+id = "app"
+command = "node server.js --port 4000"
+port = { env = "PORT" }
+"#,
+    );
+
+    let all = findings(&fixture);
+    let pinned = all
+        .iter()
+        .find(|entry| entry.summary.contains("4000"))
+        .expect("the manifest command pins a port");
+    assert!(pinned.is_drift());
+    let suggestion = pinned.suggestion.clone().unwrap_or_default();
+    assert!(suggestion.contains("${PORT:-4000}"), "{suggestion}");
+    assert!(
+        suggestion.contains("port.env") || suggestion.contains("already names PORT"),
+        "the manifest already declares the variable: {suggestion}"
+    );
+}
+
+#[test]
+fn a_script_that_already_reads_its_port_is_clean() {
+    let fixture = pinned_repo();
+    fixture.write(
+        "package.json",
+        r#"{"name":"app","packageManager":"npm@10","scripts":{"dev":"next dev --turbo -p ${APP_PORT:-3005}"}}"#,
+    );
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+[app]
+id = "app"
+
+[[services]]
+id = "app"
+target = { kind = "npm", script = "dev" }
+port = { env = "APP_PORT" }
+"#,
+    );
+
+    assert_eq!(drift_summaries(&fixture), Vec::<String>::new());
+}

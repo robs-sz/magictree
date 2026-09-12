@@ -8,6 +8,7 @@
 pub mod wizard;
 
 use crate::discover::extractors::{install_command, install_inputs, parse_port_mapping};
+use crate::discover::ports;
 use crate::discover::report::*;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
@@ -322,6 +323,93 @@ pub fn apply(planned: &[Generated], force: bool) -> Result<Vec<PathBuf>> {
         written.push(file.path.clone());
     }
     Ok(written)
+}
+
+/// Hazards the generated manifest cannot repair on its own: a step the run
+/// answer points at pins a port, so the variable magictree injects into that
+/// step would be ignored, and a second worktree could not pick its own port.
+pub fn warnings(report: &Report, answers: &AnswerSet) -> Vec<String> {
+    let mut out = Vec::new();
+    for app in &report.apps {
+        let Some(spec) = answers
+            .answers
+            .get(&format!("{}.run", app.id))
+            .and_then(|answer| answer.as_one())
+            .filter(|spec| *spec != "skip")
+        else {
+            continue;
+        };
+        let variable = answers
+            .answers
+            .get(&format!("{}.port_env", app.id))
+            .and_then(|answer| answer.as_one())
+            .filter(|name| !name.is_empty() && *name != "none")
+            .unwrap_or("PORT")
+            .to_string();
+        let facts: Vec<&Fact> = report
+            .facts
+            .iter()
+            .filter(|fact| fact.app.as_deref() == Some(app.id.as_str()) || app.dir == ".")
+            .collect();
+        let Some((kind, rest)) = spec.split_once(':') else {
+            continue;
+        };
+        let sites = match kind {
+            "npm" | "pnpm" | "yarn" | "bun" => ports::sites(&facts, FactKind::Node, rest),
+            "just" => ports::sites(&facts, FactKind::Just, rest),
+            "mise" => ports::sites(&facts, FactKind::Mise, rest),
+            "uv" => ports::sites(&facts, FactKind::Python, rest),
+            "procfile" => ports::sites(&facts, FactKind::Procfile, rest),
+            // A raw command carries its own text; scanned below.
+            "command" => Vec::new(),
+            _ => Vec::new(),
+        };
+        // One warning per step, naming every port it pins.
+        let mut warned: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (fact, _) in sites {
+            if !warned.insert(fact.id.clone()) {
+                continue;
+            }
+            let group: Vec<&PortLiteralFact> = ports::all(&facts)
+                .into_iter()
+                .filter(|(other, literal)| {
+                    other.id == fact.id && literal.container.as_deref() == Some(rest)
+                })
+                .map(|(_, literal)| literal)
+                .collect();
+            let listed: Vec<String> = group
+                .iter()
+                .map(|literal| literal.port.to_string())
+                .collect();
+            let suggestion = group
+                .first()
+                .map(|literal| ports::suggestion(literal, Some(&variable)))
+                .unwrap_or_default();
+            out.push(format!(
+                "{} {} pins port {}; {suggestion}",
+                fact.source,
+                ports::step_label(fact.kind, rest),
+                listed.join(" and ")
+            ));
+        }
+        if kind == "command" {
+            for literal in ports::scan(rest) {
+                let fact = PortLiteralFact {
+                    port: literal.port,
+                    kind: literal.kind,
+                    literal: literal.literal,
+                    container: None,
+                    text: rest.to_string(),
+                };
+                out.push(format!(
+                    "the command `{rest}` pins port {}; {}",
+                    fact.port,
+                    ports::suggestion(&fact, Some(&variable))
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Bootstrap runs the install first, then whatever generates files the dev

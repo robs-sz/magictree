@@ -1,5 +1,6 @@
 //! Fact extractors. Pure file reads: nothing from the repository is executed.
 
+use super::ports;
 use super::report::*;
 use crate::repo::Repo;
 use anyhow::Result;
@@ -248,7 +249,7 @@ impl Builder {
 
         let package_json = app_root.join("package.json");
         if let Some(value) = read_json(&package_json) {
-            let scripts = value
+            let scripts: Vec<ScriptFact> = value
                 .get("scripts")
                 .and_then(|scripts| scripts.as_object())
                 .map(|scripts| {
@@ -261,6 +262,11 @@ impl Builder {
                         .collect()
                 })
                 .unwrap_or_default();
+            let ports = port_literals(
+                scripts
+                    .iter()
+                    .map(|script| (script.name.as_str(), script.command.as_str())),
+            );
             let dependencies = ["dependencies", "devDependencies"]
                 .iter()
                 .filter_map(|key| value.get(key))
@@ -284,6 +290,7 @@ impl Builder {
                     scripts,
                     has_workspaces: value.get("workspaces").is_some(),
                     dependencies,
+                    ports,
                 },
             );
         }
@@ -325,6 +332,12 @@ impl Builder {
         let justfile = app_root.join("justfile");
         if justfile.is_file() {
             let facts = parse_justfile(&justfile);
+            let ports = port_literals(
+                facts
+                    .recipe_bodies
+                    .iter()
+                    .map(|(recipe, body)| (recipe.as_str(), body.as_str())),
+            );
             self.push(
                 &justfile,
                 FactKind::Just,
@@ -337,6 +350,7 @@ impl Builder {
                     exported_parameters: facts.exported_parameters,
                     recipe_bodies: facts.recipe_bodies,
                     variables: facts.variables,
+                    ports,
                 },
             );
         }
@@ -373,6 +387,26 @@ impl Builder {
                 let path = self.root.join(dir).join(name);
                 if path.is_file() {
                     compose_files.push(path);
+                }
+            }
+            // `infra/local/docker-compose.yml` is a common layout. One level
+            // down, listed in a stable order, not a walk of the whole tree.
+            let mut nested: Vec<std::path::PathBuf> = std::fs::read_dir(self.root.join(dir))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.is_dir())
+                        .collect()
+                })
+                .unwrap_or_default();
+            nested.sort();
+            for child in nested {
+                for name in COMPOSE_NAMES {
+                    let path = child.join(name);
+                    if path.is_file() {
+                        compose_files.push(path);
+                    }
                 }
             }
         }
@@ -425,6 +459,12 @@ impl Builder {
         let justfile = self.root.join("justfile");
         if justfile.is_file() {
             let facts = parse_justfile(&justfile);
+            let ports = port_literals(
+                facts
+                    .recipe_bodies
+                    .iter()
+                    .map(|(recipe, body)| (recipe.as_str(), body.as_str())),
+            );
             self.push(
                 &justfile,
                 FactKind::Just,
@@ -437,6 +477,7 @@ impl Builder {
                     exported_parameters: facts.exported_parameters,
                     recipe_bodies: facts.recipe_bodies,
                     variables: facts.variables,
+                    ports,
                 },
             );
         }
@@ -455,6 +496,11 @@ impl Builder {
                     })
                     .filter(|key| !key.is_empty())
                     .collect();
+                let ports = port_literals(raw.lines().filter_map(|line| {
+                    let line = line.trim();
+                    let (name, _) = line.split_once('=')?;
+                    Some((name.trim(), line))
+                }));
                 self.push(
                     &path,
                     FactKind::EnvExample,
@@ -463,6 +509,7 @@ impl Builder {
                     FactData::EnvExample {
                         variables,
                         file: name.to_string(),
+                        ports,
                     },
                 );
             }
@@ -470,7 +517,7 @@ impl Builder {
 
         let procfile = self.root.join("Procfile");
         if let Ok(raw) = std::fs::read_to_string(&procfile) {
-            let processes = raw
+            let processes: Vec<ScriptFact> = raw
                 .lines()
                 .filter_map(|line| {
                     let (name, command) = line.split_once(':')?;
@@ -480,12 +527,17 @@ impl Builder {
                     })
                 })
                 .collect();
+            let ports = port_literals(
+                processes
+                    .iter()
+                    .map(|process| (process.name.as_str(), process.command.as_str())),
+            );
             self.push(
                 &procfile,
                 FactKind::Procfile,
                 None,
                 Confidence::High,
-                FactData::Procfile { processes },
+                FactData::Procfile { processes, ports },
             );
         }
     }
@@ -501,6 +553,24 @@ impl Builder {
             unknowns,
         }
     }
+}
+
+/// Port literals in a set of steps — a script, recipe, or process body — each
+/// labelled with the step it came from.
+fn port_literals<'a>(steps: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<PortLiteralFact> {
+    let mut out = Vec::new();
+    for (container, text) in steps {
+        for literal in ports::scan(text) {
+            out.push(PortLiteralFact {
+                port: literal.port,
+                kind: literal.kind,
+                literal: literal.literal,
+                container: Some(container.to_string()),
+                text: text.to_string(),
+            });
+        }
+    }
+    out
 }
 
 fn compose_service(name: &str, service: &Yaml) -> ComposeServiceFact {
@@ -1124,7 +1194,7 @@ fn run_candidates(root: &Path, app: &AppFacts, facts: &[Fact]) -> Vec<Candidate>
                     });
                 }
             }
-            FactData::Procfile { processes } => {
+            FactData::Procfile { processes, .. } => {
                 for process in processes {
                     out.push(Candidate {
                         value: format!("procfile:{}", process.name),

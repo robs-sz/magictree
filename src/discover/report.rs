@@ -93,6 +93,9 @@ pub enum FactData {
         scripts: Vec<ScriptFact>,
         has_workspaces: bool,
         dependencies: Vec<String>,
+        /// Ports written into a script rather than read from the environment.
+        #[serde(default)]
+        ports: Vec<PortLiteralFact>,
     },
     Workspace {
         tool: String,
@@ -122,6 +125,9 @@ pub enum FactData {
         /// Just variable to the environment variable it is read from.
         #[serde(default)]
         variables: std::collections::BTreeMap<String, String>,
+        /// Ports written into a recipe body.
+        #[serde(default)]
+        ports: Vec<PortLiteralFact>,
     },
     Python {
         manager: String,
@@ -132,10 +138,44 @@ pub enum FactData {
     EnvExample {
         variables: Vec<String>,
         file: String,
+        /// Ports pinned to a number in the template.
+        #[serde(default)]
+        ports: Vec<PortLiteralFact>,
     },
     Procfile {
         processes: Vec<ScriptFact>,
+        /// Ports pinned by a process command.
+        #[serde(default)]
+        ports: Vec<PortLiteralFact>,
     },
+}
+
+/// A port written into a file rather than read from the environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortLiteralFact {
+    pub port: u16,
+    pub kind: PortKind,
+    /// The literal as written: `-p 3005`, `--port=8000`, `DATABASE_PORT=5433`,
+    /// `localhost:5173`.
+    pub literal: String,
+    /// Step it sits in: a script, recipe, or task name; a variable name in an
+    /// env file; absent for a raw command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    /// The text containing it, so the fix can be shown in context.
+    pub text: String,
+}
+
+/// How the port was written, which decides what the fix looks like.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortKind {
+    /// A command-line flag: `-p 3005`, `--port=8000`.
+    Flag,
+    /// An inline or env-file assignment: `PORT=3005`.
+    Assignment,
+    /// A URL or address literal: `localhost:5173`.
+    Url,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

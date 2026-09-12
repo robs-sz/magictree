@@ -2,10 +2,11 @@
 //! claim. Reuses discovery, so drift detection cannot silently diverge from it.
 
 use crate::discover::extract;
-use crate::discover::report::{FactData, FactKind, Report};
-use crate::manifest::{Expose, Loaded, NodeKind, Runtime, Target};
+use crate::discover::ports;
+use crate::discover::report::{Fact, FactData, FactKind, PortLiteralFact, Report};
+use crate::manifest::{Expose, Loaded, NodeKind, Runtime, Service, Target};
 use anyhow::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// How much a finding matters. Only `Drift` findings fail the command; `Info`
@@ -132,11 +133,7 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
     // Targets: the script, recipe, or task must still exist.
     for app in &loaded.apps {
         let rel = relative(&loaded.workspace_dir, &app.dir);
-        let facts: Vec<&crate::discover::report::Fact> = report
-            .facts
-            .iter()
-            .filter(|fact| fact.app.as_deref() == Some(app.id.as_str()) || rel == ".")
-            .collect();
+        let facts = app_facts(report, &app.id, &rel);
         for service in &app.manifest.services {
             let Some(target) = &service.target else {
                 continue;
@@ -160,11 +157,7 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
     // default while the health probe watches the allocated port.
     for app in &loaded.apps {
         let rel = relative(&loaded.workspace_dir, &app.dir);
-        let facts: Vec<&crate::discover::report::Fact> = report
-            .facts
-            .iter()
-            .filter(|fact| fact.app.as_deref() == Some(app.id.as_str()) || rel == ".")
-            .collect();
+        let facts = app_facts(report, &app.id, &rel);
         for service in &app.manifest.services {
             let Some(variable) = service
                 .port
@@ -209,6 +202,79 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
                 ));
             }
         }
+    }
+
+    // A port pinned in the command a service runs overrides the variable
+    // magictree injects, so that service can never follow a per-worktree port:
+    // the second worktree to start would try to bind the same number.
+    let mut reported: BTreeSet<(String, String)> = BTreeSet::new();
+    for app in &loaded.apps {
+        let rel = relative(&loaded.workspace_dir, &app.dir);
+        let facts = app_facts(report, &app.id, &rel);
+        for service in &app.manifest.services {
+            let advice = port_advice(loaded, &app.id, service);
+            for pinned in pinned_ports(service, &facts) {
+                let rewrite = ports::rewrite(&pinned.command, &advice.variable)
+                    .unwrap_or_else(|| pinned.command.clone());
+                let mut list: Vec<u16> = pinned.literals.iter().map(|item| item.port).collect();
+                list.sort_unstable();
+                list.dedup();
+                let shown: Vec<String> = list.iter().map(u16::to_string).collect();
+                let mut suggestion = format!("change it to `{rewrite}`");
+                if advice.declared {
+                    suggestion.push_str(&format!(
+                        "; the manifest already names {} as this service's port variable",
+                        advice.variable
+                    ));
+                } else {
+                    suggestion.push_str(&format!(
+                        " and set port = {{ env = \"{}\" }} on service '{}'",
+                        advice.variable, service.id
+                    ));
+                }
+                if let Some(clash) = &advice.clash {
+                    suggestion.push_str(&format!(" ({clash})"));
+                }
+                drift.push(Drift::new(
+                    format!(
+                        "service '{}' runs {} (`{}`), which pins port {}; every worktree would try to bind the same port",
+                        service.id,
+                        pinned.origin,
+                        pinned.command,
+                        shown.join(" and ")
+                    ),
+                    Some(suggestion),
+                ));
+                if let Some(step) = &pinned.step {
+                    reported.insert(step.clone());
+                }
+            }
+        }
+    }
+
+    // Ports pinned anywhere else — a seed script, a test helper, a committed
+    // env template. Worth naming, but only the service's own command is
+    // guaranteed to be started by magictree.
+    let all_facts: Vec<&Fact> = report.facts.iter().collect();
+    for (fact, literal) in ports::all(&all_facts) {
+        let container = literal.container.clone().unwrap_or_default();
+        if !reported.insert((fact.id.clone(), container.clone())) {
+            continue;
+        }
+        // Only a port some service actually allocates can be pointed at; for
+        // anything else the honest answer is that the manifest owes it a port.
+        let variable = variable_for_port(loaded, literal.port);
+        let suggestion = ports::suggestion(literal, variable.as_deref());
+        drift.push(Drift::info(
+            format!(
+                "{} pins port {} in {} (`{}`)",
+                fact.source,
+                literal.port,
+                ports::step_label(fact.kind, &container),
+                literal.text
+            ),
+            Some(suggestion),
+        ));
     }
 
     // A manifest that git does not track is invisible to every new worktree, so
@@ -293,7 +359,164 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
     drift
 }
 
-fn missing_target(target: &Target, facts: &[&crate::discover::report::Fact]) -> Option<String> {
+/// Facts belonging to one app, plus the repository-level facts it inherits.
+fn app_facts<'a>(report: &'a Report, app: &str, relative_dir: &str) -> Vec<&'a Fact> {
+    report
+        .facts
+        .iter()
+        .filter(|fact| fact.app.as_deref() == Some(app) || relative_dir == ".")
+        .collect()
+}
+
+/// A port the service's own command pins, with where it came from.
+struct PinnedPort {
+    /// How the source reads in a finding: `script 'dev' in package.json`.
+    origin: String,
+    /// The text that has to change.
+    command: String,
+    literals: Vec<PortLiteralFact>,
+    /// Recorded step this covers, so the informational pass does not repeat it.
+    step: Option<(String, String)>,
+}
+
+/// Every place the command magictree starts for this service pins a port.
+fn pinned_ports(service: &Service, facts: &[&Fact]) -> Vec<PinnedPort> {
+    let mut out: Vec<PinnedPort> = Vec::new();
+    let target = service.target.as_ref();
+    let step = match target {
+        Some(Target::Npm { script, .. }) | Some(Target::Pnpm { script, .. }) => {
+            Some((FactKind::Node, "script", script))
+        }
+        Some(Target::Just { recipe, .. }) => Some((FactKind::Just, "recipe", recipe)),
+        Some(Target::Mise { task, .. }) => Some((FactKind::Mise, "task", task)),
+        Some(Target::Uv {
+            script: Some(script),
+            ..
+        }) => Some((FactKind::Python, "script", script)),
+        _ => None,
+    };
+    if let Some((kind, word, name)) = step {
+        let mut by_file: BTreeMap<String, PinnedPort> = BTreeMap::new();
+        for (fact, literal) in ports::sites(facts, kind, name) {
+            let entry = by_file
+                .entry(fact.id.clone())
+                .or_insert_with(|| PinnedPort {
+                    origin: format!("{word} '{name}' in {}", fact.source),
+                    command: literal.text.clone(),
+                    literals: Vec::new(),
+                    step: Some((fact.id.clone(), name.clone())),
+                });
+            entry.literals.push(literal.clone());
+        }
+        out.extend(by_file.into_values());
+    }
+    // The target's own command line, which is where a `--port` in `args` lives.
+    let own = match target {
+        Some(target) => Some(target.command()),
+        None => service.command.clone(),
+    };
+    if let Some(command) = own {
+        let literals: Vec<PortLiteralFact> = ports::scan(&command)
+            .into_iter()
+            .map(|literal| PortLiteralFact {
+                port: literal.port,
+                kind: literal.kind,
+                literal: literal.literal,
+                container: None,
+                text: command.clone(),
+            })
+            .collect();
+        if !literals.is_empty() {
+            out.push(PinnedPort {
+                origin: "the command in magictree.toml".to_string(),
+                command,
+                literals,
+                step: None,
+            });
+        }
+    }
+    out
+}
+
+/// Where a service's port should come from, and whether the manifest says so.
+struct PortAdvice {
+    variable: String,
+    declared: bool,
+    /// Set when the declared variable had to be replaced, and why.
+    clash: Option<String>,
+}
+
+fn port_advice(loaded: &Loaded, app_id: &str, service: &Service) -> PortAdvice {
+    let fallback = format!("{}_PORT", app_id.to_ascii_uppercase().replace('-', "_"));
+    let Some(declared) = service.ports().iter().find_map(|port| port.env.clone()) else {
+        return PortAdvice {
+            variable: fallback,
+            declared: false,
+            clash: None,
+        };
+    };
+    // magictree injects each service's own port under the name it declares, so
+    // a variable two services claim cannot be right for both of them.
+    if let Some(owner) = other_service_using(loaded, &service.id, &declared) {
+        return PortAdvice {
+            variable: fallback,
+            declared: false,
+            clash: Some(format!(
+                "'{declared}' is also service '{owner}'s port variable"
+            )),
+        };
+    }
+    PortAdvice {
+        variable: declared,
+        declared: true,
+        clash: None,
+    }
+}
+
+fn other_service_using(loaded: &Loaded, service_id: &str, variable: &str) -> Option<String> {
+    let manifests = loaded
+        .apps
+        .iter()
+        .map(|app| &app.manifest)
+        .chain(std::iter::once(&loaded.workspace));
+    for manifest in manifests {
+        for service in &manifest.services {
+            if service.id == service_id {
+                continue;
+            }
+            if service
+                .ports()
+                .iter()
+                .any(|port| port.env.as_deref() == Some(variable))
+            {
+                return Some(service.id.clone());
+            }
+        }
+    }
+    None
+}
+
+/// The variable that carries an already-declared port, so an unrelated literal
+/// can point at the same number instead of repeating it.
+fn variable_for_port(loaded: &Loaded, port: u16) -> Option<String> {
+    let manifests = loaded
+        .apps
+        .iter()
+        .map(|app| &app.manifest)
+        .chain(std::iter::once(&loaded.workspace));
+    for manifest in manifests {
+        for service in &manifest.services {
+            for spec in service.ports() {
+                if (spec.prefer == Some(port) || spec.require == Some(port)) && spec.env.is_some() {
+                    return spec.env.clone();
+                }
+            }
+        }
+    }
+    None
+}
+
+fn missing_target(target: &Target, facts: &[&Fact]) -> Option<String> {
     let has_script = |name: &str| {
         facts.iter().any(|fact| match &fact.data {
             FactData::Node { scripts, .. } => scripts.iter().any(|script| script.name == name),

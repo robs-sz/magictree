@@ -394,3 +394,85 @@ fn compose_files_in_infra_directories_are_found() {
         .expect("compose fact from infra/");
     assert_eq!(compose.source, "infra/compose.yml");
 }
+
+#[test]
+fn a_compose_file_one_level_inside_infra_is_found() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "infra/local/docker-compose.yml",
+        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5433:5432\"\n",
+    );
+    fixture.write("package.json", r#"{"name":"solo"}"#);
+    fixture.git_repo();
+    let report = extract(fixture.path()).expect("extract");
+
+    let compose = report
+        .facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Compose)
+        .expect("compose fact from infra/local/");
+    assert_eq!(compose.source, "infra/local/docker-compose.yml");
+    let FactData::Compose { services, .. } = &compose.data else {
+        panic!("expected compose data");
+    };
+    assert_eq!(services[0].name, "postgres");
+}
+
+#[test]
+fn records_ports_pinned_in_scripts_and_env_templates() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        r#"{"name":"app","scripts":{"dev":"next dev --turbo -p 3005","seed":"tsx scripts/seed.ts --port 5433"}}"#,
+    );
+    fixture.write(".env.example", "DATABASE_PORT=\"5433\"\n");
+    fixture.git_repo();
+
+    let report = extract(fixture.path()).expect("extract");
+
+    let node = report
+        .facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Node)
+        .expect("node fact");
+    let FactData::Node { ports, .. } = &node.data else {
+        panic!("expected node data");
+    };
+    let dev = ports
+        .iter()
+        .find(|literal| literal.container.as_deref() == Some("dev"))
+        .expect("the dev script pins a port");
+    assert_eq!(dev.port, 3005);
+    assert_eq!(dev.literal, "-p 3005");
+    assert!(ports.iter().any(|literal| literal.port == 5433));
+
+    let env = report
+        .facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::EnvExample)
+        .expect("env fact");
+    let FactData::EnvExample { ports, .. } = &env.data else {
+        panic!("expected env data");
+    };
+    assert_eq!(ports.len(), 1);
+    assert_eq!(ports[0].container.as_deref(), Some("DATABASE_PORT"));
+    assert_eq!(ports[0].port, 5433);
+}
+
+#[test]
+fn a_script_that_reads_a_variable_pins_nothing() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        r#"{"name":"app","scripts":{"dev":"next dev --turbo -p ${APP_PORT:-3005}"}}"#,
+    );
+    fixture.write(".env.example", "${WT_PORT_DB:-5432}:5432\n");
+    fixture.git_repo();
+
+    let report = extract(fixture.path()).expect("extract");
+    let facts: Vec<&magictree::discover::report::Fact> = report.facts.iter().collect();
+    assert!(
+        magictree::discover::ports::all(&facts).is_empty(),
+        "an expansion is not a literal"
+    );
+}

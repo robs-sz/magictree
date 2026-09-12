@@ -320,6 +320,30 @@ fn cmd_discover(args: DiscoverArgs) -> Result<()> {
                         describe_fact(&fact.data)
                     );
                 }
+                println!("\n# hardcoded ports");
+                let facts: Vec<&discover::report::Fact> = report.facts.iter().collect();
+                let pinned = discover::ports::all(&facts);
+                if pinned.is_empty() {
+                    println!("(none)");
+                }
+                for (fact, literal) in pinned {
+                    let container = literal.container.clone().unwrap_or_default();
+                    // With no manifest there is nothing to point at yet, so a
+                    // committed template only gets the generic advice.
+                    let suggestion_variable =
+                        (fact.kind != discover::report::FactKind::EnvExample).then_some("PORT");
+                    println!(
+                        "{:<6} {:<24} {:<24} {}",
+                        fact.id,
+                        fact.source,
+                        format!(
+                            "{} {}",
+                            discover::ports::step_label(fact.kind, &container),
+                            literal.literal
+                        ),
+                        discover::ports::suggestion(literal, suggestion_variable)
+                    );
+                }
                 println!("\n# unknowns");
                 if report.unknowns.is_empty() {
                     println!("(none)");
@@ -385,7 +409,7 @@ fn describe_fact(data: &discover::FactData) -> String {
             ..
         } => format!("{manager}, groups: {}", dependency_groups.join(", ")),
         Data::EnvExample { variables, .. } => format!("{} variable(s)", variables.len()),
-        Data::Procfile { processes } => format!("{} process(es)", processes.len()),
+        Data::Procfile { processes, .. } => format!("{} process(es)", processes.len()),
     }
 }
 
@@ -401,6 +425,9 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
         answers.write(path)?;
     }
     let planned = init::plan(&report, &answers, &root)?;
+    for warning in init::warnings(&report, &answers) {
+        eprintln!("warning: {warning}");
+    }
     if dry_run || args.print {
         println!("dry run — no manifest is written\n");
         for file in &planned {

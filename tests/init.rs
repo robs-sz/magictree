@@ -4,7 +4,7 @@ mod support;
 
 use magictree::discover::report::{Answer, AnswerSet, REPORT_VERSION};
 use magictree::discover::{extract, Report};
-use magictree::init::{apply, default_answers, plan};
+use magictree::init::{apply, default_answers, plan, warnings};
 use std::collections::BTreeMap;
 use support::Fixture;
 
@@ -501,4 +501,49 @@ fn answer_members_must_exist_in_the_report() {
 
     let error = plan(&report, &answers, fixture.path()).expect_err("must reject");
     assert!(error.to_string().contains("apps/ghost"), "{error}");
+}
+
+/// A repository whose dev script decides its own port.
+fn pinned_app(dev: &str) -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        &format!(r#"{{"name":"app","packageManager":"npm@10","scripts":{{"dev":"{dev}"}}}}"#),
+    );
+    fixture.write("package-lock.json", "{}");
+    fixture.git_repo();
+    fixture
+}
+
+fn answers_with(report: &Report, run: &str, port_env: &str) -> AnswerSet {
+    let app = &report.apps[0].id;
+    let mut answers = default_answers(report);
+    answers
+        .answers
+        .insert(format!("{app}.run"), Answer::One(run.to_string()));
+    answers
+        .answers
+        .insert(format!("{app}.port_env"), Answer::One(port_env.to_string()));
+    answers
+}
+
+#[test]
+fn warns_when_the_chosen_run_step_pins_its_own_port() {
+    let fixture = pinned_app("next dev --turbo -p 3005");
+    let report = extract(fixture.path()).expect("extract");
+    let answers = answers_with(&report, "npm:dev", "APP_PORT");
+
+    let found = warnings(&report, &answers);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("script 'dev'"), "{found:?}");
+    assert!(found[0].contains("${APP_PORT:-3005}"), "{found:?}");
+}
+
+#[test]
+fn says_nothing_when_the_run_step_reads_the_variable() {
+    let fixture = pinned_app("next dev --turbo -p ${APP_PORT:-3005}");
+    let report = extract(fixture.path()).expect("extract");
+    let answers = answers_with(&report, "npm:dev", "APP_PORT");
+
+    assert!(warnings(&report, &answers).is_empty());
 }

@@ -6,6 +6,7 @@
 //! ever produced from information that was actually determined.
 
 pub mod extractors;
+pub mod ports;
 pub mod report;
 
 pub use extractors::extract;

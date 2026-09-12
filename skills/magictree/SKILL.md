@@ -180,6 +180,12 @@ Rules that matter:
 - `runtime` defaults to `compose` when `compose` is present, otherwise a host process.
 - `port.env` must be the variable the process actually reads. Check the app's own
   configuration before assuming `PORT`.
+- A command that pins a port — `next dev -p 3005`, `uvicorn --port 8000`,
+  `DATABASE_PORT=5433` — ignores `port.env`, so the second worktree tries to bind the
+  same number. `magictree discover` lists these literals, `init` warns about the step it
+  chose, and `doctor` reports the service's own command as drift with the rewrite
+  (`next dev -p ${APP_PORT:-3005}`). Never paper over one by hardcoding the port in the
+  manifest instead.
 - Host services need either `command` or `target`. Compose services need neither.
 - A compose service must give `port.target` (the container-side port) for every port it
   exposes. `expose = "none"` publishes nothing.
