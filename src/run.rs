@@ -1,0 +1,169 @@
+use anyhow::{Context, Result};
+use nix::errno::Errno;
+use nix::sys::signal::{kill, killpg, Signal};
+use nix::unistd::Pid;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
+pub fn sanitize(name: &str) -> String {
+    name.replace(':', "_")
+}
+
+pub fn pid_file(runtime_dir: &Path, name: &str) -> PathBuf {
+    runtime_dir
+        .join("run")
+        .join(format!("{}.pid", sanitize(name)))
+}
+
+pub fn log_file(runtime_dir: &Path, name: &str) -> PathBuf {
+    runtime_dir
+        .join("log")
+        .join(format!("{}.log", sanitize(name)))
+}
+
+pub fn read_pid(runtime_dir: &Path, name: &str) -> Option<i32> {
+    let raw = std::fs::read_to_string(pid_file(runtime_dir, name)).ok()?;
+    raw.trim().parse::<i32>().ok()
+}
+
+pub fn is_alive(pid: i32) -> bool {
+    match kill(Pid::from_raw(pid), Option::<Signal>::None) {
+        Ok(()) => true,
+        Err(Errno::EPERM) => true,
+        Err(_) => false,
+    }
+}
+
+/// Launch a long-running process in its own session so the whole tree can be
+/// signalled later, with output captured to a per-run log file.
+pub fn start(
+    runtime_dir: &Path,
+    name: &str,
+    command: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<i32> {
+    std::fs::create_dir_all(runtime_dir.join("run"))?;
+    std::fs::create_dir_all(runtime_dir.join("log"))?;
+    let log_path = log_file(runtime_dir, name);
+    let log =
+        File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+
+    let mut process = Command::new("sh");
+    process
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .envs(env);
+    unsafe {
+        process.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(|_| ())
+                .map_err(|_| std::io::Error::last_os_error())
+        });
+    }
+    let mut child = process
+        .spawn()
+        .with_context(|| format!("starting '{name}': {command}"))?;
+    let pid = child.id() as i32;
+
+    // Reap the child when it exits. Without this a process that dies during
+    // startup lingers as a zombie, and liveness checks keep reporting it as
+    // running — which makes a failure report actively misleading.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(pid_file(runtime_dir, name))?;
+    writeln!(file, "{pid}")?;
+    Ok(pid)
+}
+
+/// Stop a supervised host process tree. Returns true when something was stopped.
+pub fn stop(runtime_dir: &Path, name: &str, timeout: Duration) -> Result<bool> {
+    let Some(pid) = read_pid(runtime_dir, name) else {
+        return Ok(false);
+    };
+    let path = pid_file(runtime_dir, name);
+    if !is_alive(pid) {
+        let _ = std::fs::remove_file(&path);
+        return Ok(false);
+    }
+    let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !is_alive(pid) {
+            break;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    if is_alive(pid) {
+        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+    }
+    let _ = std::fs::remove_file(&path);
+    Ok(true)
+}
+
+/// Stop every supervised process recorded in this worktree, including pid
+/// files left behind by services that no longer exist in the manifest.
+/// Returns `(name, was_running)` for each entry, sorted by name.
+pub fn stop_all(runtime_dir: &Path, timeout: Duration) -> Result<Vec<(String, bool)>> {
+    let dir = runtime_dir.join("run");
+    let mut names: Vec<String> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("pid") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        names.push(name.to_string());
+    }
+    names.sort();
+    let mut stopped = Vec::new();
+    for name in names {
+        let running = stop(runtime_dir, &name, timeout)?;
+        stopped.push((name, running));
+    }
+    Ok(stopped)
+}
+
+/// The last `lines` lines a supervised process wrote, for failure reports.
+pub fn log_tail(runtime_dir: &Path, name: &str, lines: usize) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(log_file(runtime_dir, name)) else {
+        return Vec::new();
+    };
+    let all: Vec<&str> = raw.lines().filter(|line| !line.trim().is_empty()).collect();
+    let start = all.len().saturating_sub(lines);
+    all[start..].iter().map(|line| line.to_string()).collect()
+}
+
+/// Run a command to completion in the foreground.
+pub fn run_once(command: &str, cwd: &Path, env: &BTreeMap<String, String>) -> Result<()> {
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .envs(env)
+        .status()
+        .with_context(|| format!("running '{command}'"))?;
+    anyhow::ensure!(status.success(), "'{command}' exited with {status}");
+    Ok(())
+}

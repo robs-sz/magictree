@@ -5,7 +5,10 @@
 //! checkout, and supervises services.
 
 pub mod config;
+pub mod health;
 pub mod manifest;
 pub mod paths;
+pub mod ports;
 pub mod repo;
+pub mod run;
 pub mod slug;
