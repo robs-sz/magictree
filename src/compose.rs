@@ -169,26 +169,32 @@ pub fn write_override(runtime_dir: &Path, group: &ComposeGroup) -> Result<PathBu
         ));
         out.push_str(&format!("      magictree.project: \"{}\"\n", group.project));
         out.push_str(&format!("      magictree.repo: \"{}\"\n", group.repo_key));
-        match service.expose {
-            Expose::None => out.push_str("    ports: !reset []\n"),
-            Expose::Port => {
-                let mut lines = String::new();
-                for mapping in &service.mappings {
-                    let host = mapping.host.ok_or_else(|| {
-                        anyhow!("service '{}' has an unallocated port", service.name)
-                    })?;
-                    let target = mapping.target.ok_or_else(|| {
-                        anyhow!(
-                            "service '{}' has a port without a container-side target",
-                            service.name
-                        )
-                    })?;
-                    lines.push_str(&format!("      - \"127.0.0.1:{host}:{target}\"\n"));
-                }
-                out.push_str("    ports: !override\n");
-                out.push_str(&lines);
-            }
+        // Publish only when there is something to publish. `expose` defaults to
+        // `port`, so a compose service that declares no ports used to emit
+        // `ports: !override` with nothing under it — YAML null, which Compose
+        // rejects outright ("services.x.ports must be a array"), so the service
+        // could not start at all. Nothing declared means publish nothing, which
+        // is also how `expose = "none"` clears ports the base file declares.
+        let publish = service.expose == Expose::Port && !service.mappings.is_empty();
+        if !publish {
+            out.push_str("    ports: !reset []\n");
+            continue;
         }
+        let mut lines = String::new();
+        for mapping in &service.mappings {
+            let host = mapping
+                .host
+                .ok_or_else(|| anyhow!("service '{}' has an unallocated port", service.name))?;
+            let target = mapping.target.ok_or_else(|| {
+                anyhow!(
+                    "service '{}' has a port without a container-side target",
+                    service.name
+                )
+            })?;
+            lines.push_str(&format!("      - \"127.0.0.1:{host}:{target}\"\n"));
+        }
+        out.push_str("    ports: !override\n");
+        out.push_str(&lines);
     }
     std::fs::write(&path, out).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
