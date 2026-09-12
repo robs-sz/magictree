@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::net::TcpListener;
+use std::net::{TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 pub const ASSIGNMENT_VERSION: u32 = 1;
@@ -233,19 +233,41 @@ fn assign_in_block(config: &Config, base: u16, requests: &[PortRequest]) -> Resu
     Ok(BlockOutcome::Assigned(ports))
 }
 
-/// A port is free only when it is free on both loopback families, because a
-/// service asked to listen on `localhost` may bind IPv6 only.
+/// A port is free only when every address shape a service might bind is free.
+///
+/// Probing loopback alone is not enough. On macOS a `SO_REUSEADDR` bind to
+/// `127.0.0.1` or `::1` still succeeds while another process holds the wildcard,
+/// so a dev server listening on `::` looked free: two worktrees were handed the
+/// same port, the second service died with `EADDRINUSE`, and its health probe was
+/// answered by the first worktree's process — recording a stack that was never up.
+///
+/// Each shape is caught only by its own probe, so all four are needed:
+///
+/// | holder | caught by |
+/// |---|---|
+/// | `127.0.0.1` | `127.0.0.1` |
+/// | `::1` | `::1` |
+/// | `0.0.0.0` | `0.0.0.0` |
+/// | `::` | `::` and `0.0.0.0` |
+///
+/// A service bound to one specific non-loopback interface is still invisible
+/// here; nothing magictree starts binds that way.
 pub fn port_free(port: u16) -> bool {
-    match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(listener) => drop(listener),
-        Err(_) => return false,
+    [("0.0.0.0", port), ("::", port), ("127.0.0.1", port), ("::1", port)]
+        .into_iter()
+        .all(is_bindable)
+}
+
+/// `AddrInUse` is the only failure that means another process holds the port: a
+/// host without an IPv6 stack must not make every port look taken.
+fn is_bindable<A: ToSocketAddrs>(address: A) -> bool {
+    match TcpListener::bind(address) {
+        Ok(listener) => {
+            drop(listener);
+            true
+        }
+        Err(error) => error.kind() != std::io::ErrorKind::AddrInUse,
     }
-    match TcpListener::bind(("::1", port)) {
-        Ok(listener) => drop(listener),
-        // No IPv6 stack: nothing can be listening there either.
-        Err(error) => return error.kind() != std::io::ErrorKind::AddrInUse,
-    }
-    true
 }
 
 fn find_assignment(blocks: &Path, repo_key: &str, worktree_id: &str) -> Result<Option<Assignment>> {

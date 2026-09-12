@@ -179,6 +179,45 @@ fn preferred_port_is_used_when_free() {
 }
 
 #[test]
+fn a_port_bound_on_the_wildcard_is_not_free() {
+    // A dev server binds `::`/`0.0.0.0`, not loopback. Probing loopback alone
+    // reported such a port as free, so two worktrees were handed the same one:
+    // the second service died with EADDRINUSE while its health probe was
+    // answered by the first worktree's process, and the stack was recorded ready.
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let guard = PortGuard::occupy_wildcard(0);
+    assert!(guard.held(), "the fixture needs a dual-stack wildcard");
+    let taken = guard.port();
+
+    assert!(
+        !ports::port_free(taken),
+        "a port listening on the wildcard is not free"
+    );
+
+    let assignment = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[PortRequest {
+            name: "web".to_string(),
+            prefer: Some(taken),
+            require: None,
+        }],
+    )
+    .expect("allocate");
+
+    let assigned = *assignment.ports.get("web").expect("a port");
+    assert_ne!(
+        assigned, taken,
+        "a preference bound on the wildcard must not be used"
+    );
+}
+
+#[test]
 fn preferred_port_falls_back_when_taken() {
     let fixture = Fixture::new();
     let paths = paths(&fixture);

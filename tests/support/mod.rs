@@ -161,14 +161,24 @@ pub struct PortGuard {
 }
 
 impl PortGuard {
+    /// Occupy `port` on loopback; `0` asks the OS for any free port.
     pub fn occupy(port: u16) -> Self {
-        match std::net::TcpListener::bind(("127.0.0.1", port)) {
-            // Port 0 asks the OS for any free port; report which one it gave.
+        Self::occupy_on(("127.0.0.1", port), port)
+    }
+
+    /// Occupy `port` the way a dev server does, on the wildcard rather than
+    /// loopback — the shape that has to be probed to be seen.
+    pub fn occupy_wildcard(port: u16) -> Self {
+        Self::occupy_on(("::", port), port)
+    }
+
+    fn occupy_on<A: std::net::ToSocketAddrs>(address: A, fallback: u16) -> Self {
+        match std::net::TcpListener::bind(address) {
             Ok(listener) => {
                 let actual = listener
                     .local_addr()
-                    .map(|address| address.port())
-                    .unwrap_or(port);
+                    .map(|local| local.port())
+                    .unwrap_or(fallback);
                 Self {
                     listener: Some(listener),
                     port: actual,
@@ -176,7 +186,7 @@ impl PortGuard {
             }
             Err(_) => Self {
                 listener: None,
-                port,
+                port: fallback,
             },
         }
     }
