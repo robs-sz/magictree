@@ -8,6 +8,7 @@ pub mod bootstrap;
 pub mod compose;
 pub mod config;
 pub mod ctx;
+pub mod dryrun;
 pub mod env;
 pub mod health;
 pub mod manifest;
