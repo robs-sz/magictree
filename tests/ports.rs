@@ -328,6 +328,131 @@ fn reassign_releases_the_assignment() {
 }
 
 #[test]
+fn a_preferred_port_stays_reserved_for_the_worktree_that_recorded_it() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+
+    // A port can be taken by another process between picking it and allocating,
+    // which would make the assertions vacuous; retry until the preference holds.
+    let mut last = None;
+    for _ in 0..5 {
+        let wanted = free_port();
+        let owner = ports::ensure(
+            &paths,
+            &config,
+            "repo",
+            "owner",
+            fixture.path(),
+            &[PortRequest {
+                name: "web".to_string(),
+                prefer: Some(wanted),
+                require: None,
+            }],
+        )
+        .expect("allocate owner");
+        if owner.ports.get("web") != Some(&wanted) {
+            last = Some(wanted);
+            let _ = ports::reassign(&paths, "repo", "owner");
+            continue;
+        }
+
+        // The owner is stopped, so nothing binds its port. A second worktree
+        // must not take it anyway: the owner's assignment still holds it, and
+        // handing it over makes the owner's dead service report healthy against
+        // the new worktree's process.
+        let other = ports::ensure(
+            &paths,
+            &config,
+            "repo",
+            "other",
+            fixture.path(),
+            &[PortRequest {
+                name: "web".to_string(),
+                prefer: Some(wanted),
+                require: None,
+            }],
+        )
+        .expect("allocate other");
+        assert_ne!(
+            other.ports.get("web"),
+            Some(&wanted),
+            "a port recorded by another worktree is reserved: {other:?}"
+        );
+
+        // Releasing the owner releases its reservation.
+        ports::reassign(&paths, "repo", "owner").expect("release owner");
+        let next = ports::ensure(
+            &paths,
+            &config,
+            "repo",
+            "next",
+            fixture.path(),
+            &[PortRequest {
+                name: "web".to_string(),
+                prefer: Some(wanted),
+                require: None,
+            }],
+        )
+        .expect("allocate next");
+        assert_eq!(
+            next.ports.get("web"),
+            Some(&wanted),
+            "a released preference is available again"
+        );
+        return;
+    }
+    panic!("a free preference was never honoured, last: {last:?}");
+}
+
+#[test]
+fn required_port_held_by_another_worktree_fails_loudly() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+
+    let mut last = None;
+    for _ in 0..5 {
+        let wanted = free_port();
+        let owner = ports::ensure(
+            &paths,
+            &config,
+            "repo",
+            "owner",
+            fixture.path(),
+            &[PortRequest {
+                name: "web".to_string(),
+                prefer: Some(wanted),
+                require: None,
+            }],
+        )
+        .expect("allocate owner");
+        if owner.ports.get("web") != Some(&wanted) {
+            last = Some(wanted);
+            let _ = ports::reassign(&paths, "repo", "owner");
+            continue;
+        }
+
+        let error = ports::ensure(
+            &paths,
+            &config,
+            "repo",
+            "other",
+            fixture.path(),
+            &[PortRequest {
+                name: "oauth".to_string(),
+                prefer: None,
+                require: Some(wanted),
+            }],
+        )
+        .expect_err("must refuse a port another worktree holds");
+        assert!(error.to_string().contains("held by"), "{error}");
+        return;
+    }
+    panic!("a free preference was never honoured, last: {last:?}");
+}
+
+#[test]
 fn configured_range_is_respected() {
     let fixture = Fixture::new();
     let paths = paths(&fixture);

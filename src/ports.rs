@@ -3,7 +3,7 @@ use crate::paths::Paths;
 use crate::slug::hash64;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{TcpListener, ToSocketAddrs};
@@ -52,7 +52,28 @@ pub fn ensure(
     let blocks = paths.blocks_dir();
     std::fs::create_dir_all(&blocks).with_context(|| format!("creating {}", blocks.display()))?;
 
-    if let Some(mut assignment) = find_assignment(&blocks, repo_key, worktree_id)? {
+    let registry = read_registry(&blocks)?;
+    // Every port another worktree recorded stays reserved, even while that
+    // worktree is stopped: a `prefer` port is outside its own block, so nothing
+    // else bounds it. Without this a second worktree takes the preferred port of
+    // a stopped one, and when the owner comes back its dead service is reported
+    // healthy by the new owner's process answering the probe. Released when the
+    // owning assignment is, by `ports --reassign` or `gc`.
+    let mut taken: HashMap<u16, String> = HashMap::new();
+    for other in &registry {
+        if other.repo_key == repo_key && other.worktree_id == worktree_id {
+            continue;
+        }
+        for port in other.ports.values() {
+            taken.insert(*port, other.worktree_id.clone());
+        }
+    }
+
+    if let Some(mut assignment) = registry
+        .iter()
+        .find(|other| other.repo_key == repo_key && other.worktree_id == worktree_id)
+        .cloned()
+    {
         let mut changed = false;
         let recorded = Some(worktree_path.to_string_lossy().to_string());
         if assignment.worktree_path != recorded {
@@ -63,7 +84,7 @@ pub fn ensure(
             if assignment.ports.contains_key(&request.name) {
                 continue;
             }
-            let port = extend(&blocks, config, &assignment, request)?;
+            let port = extend(config, &assignment, request, &taken)?;
             assignment.ports.insert(request.name.clone(), port);
             changed = true;
         }
@@ -85,7 +106,7 @@ pub fn ensure(
         if path.exists() {
             continue;
         }
-        let ports = match assign_in_block(config, base, requests)? {
+        let ports = match assign_in_block(config, base, requests, &taken)? {
             BlockOutcome::Assigned(ports) => ports,
             BlockOutcome::Unusable => continue,
         };
@@ -128,15 +149,21 @@ pub fn reassign(paths: &Paths, repo_key: &str, worktree_id: &str) -> Result<Opti
 }
 
 fn extend(
-    blocks: &Path,
     config: &Config,
     assignment: &Assignment,
     request: &PortRequest,
+    taken: &HashMap<u16, String>,
 ) -> Result<u16> {
     let used: HashSet<u16> = assignment.ports.values().copied().collect();
     if let Some(required) = request.require {
         if used.contains(&required) {
             bail!("port.require {required} is already used in this worktree");
+        }
+        if let Some(owner) = taken.get(&required) {
+            bail!(
+                "port.require {required} for '{}' is held by worktree '{owner}'",
+                request.name
+            );
         }
         if !port_free(required) {
             bail!(
@@ -147,7 +174,7 @@ fn extend(
         return Ok(required);
     }
     if let Some(preferred) = request.prefer {
-        if !used.contains(&preferred) && port_free(preferred) {
+        if !used.contains(&preferred) && !taken.contains_key(&preferred) && port_free(preferred) {
             return Ok(preferred);
         }
     }
@@ -156,13 +183,11 @@ fn extend(
         if candidate > config.port_range_end {
             break;
         }
-        if used.contains(&candidate) || !port_free(candidate) {
+        if used.contains(&candidate) || taken.contains_key(&candidate) || !port_free(candidate) {
             continue;
         }
         return Ok(candidate);
     }
-    // Fall back to a slot in a fresh block before giving up.
-    let _ = blocks;
     bail!(
         "no free port left in block {} for '{}' — run `magictree ports --reassign`",
         assignment.base,
@@ -170,7 +195,12 @@ fn extend(
     )
 }
 
-fn assign_in_block(config: &Config, base: u16, requests: &[PortRequest]) -> Result<BlockOutcome> {
+fn assign_in_block(
+    config: &Config,
+    base: u16,
+    requests: &[PortRequest],
+    taken: &HashMap<u16, String>,
+) -> Result<BlockOutcome> {
     let mut ports = BTreeMap::new();
     let mut used = HashSet::new();
 
@@ -178,6 +208,12 @@ fn assign_in_block(config: &Config, base: u16, requests: &[PortRequest]) -> Resu
         if let Some(required) = request.require {
             if !used.insert(required) {
                 bail!("port.require {required} is requested more than once");
+            }
+            if let Some(owner) = taken.get(&required) {
+                bail!(
+                    "port.require {required} for '{}' is held by worktree '{owner}'",
+                    request.name
+                );
             }
             if !port_free(required) {
                 bail!(
@@ -194,7 +230,8 @@ fn assign_in_block(config: &Config, base: u16, requests: &[PortRequest]) -> Resu
             continue;
         }
         if let Some(preferred) = request.prefer {
-            if !used.contains(&preferred) && port_free(preferred) {
+            if !used.contains(&preferred) && !taken.contains_key(&preferred) && port_free(preferred)
+            {
                 used.insert(preferred);
                 ports.insert(request.name.clone(), preferred);
             }
@@ -213,7 +250,7 @@ fn assign_in_block(config: &Config, base: u16, requests: &[PortRequest]) -> Resu
             if candidate > config.port_range_end {
                 return Ok(BlockOutcome::Unusable);
             }
-            if used.contains(&candidate) {
+            if used.contains(&candidate) || taken.contains_key(&candidate) {
                 continue;
             }
             if !port_free(candidate) {
@@ -253,9 +290,14 @@ fn assign_in_block(config: &Config, base: u16, requests: &[PortRequest]) -> Resu
 /// A service bound to one specific non-loopback interface is still invisible
 /// here; nothing magictree starts binds that way.
 pub fn port_free(port: u16) -> bool {
-    [("0.0.0.0", port), ("::", port), ("127.0.0.1", port), ("::1", port)]
-        .into_iter()
-        .all(is_bindable)
+    [
+        ("0.0.0.0", port),
+        ("::", port),
+        ("127.0.0.1", port),
+        ("::1", port),
+    ]
+    .into_iter()
+    .all(is_bindable)
 }
 
 /// `AddrInUse` is the only failure that means another process holds the port: a
@@ -270,9 +312,10 @@ fn is_bindable<A: ToSocketAddrs>(address: A) -> bool {
     }
 }
 
-fn find_assignment(blocks: &Path, repo_key: &str, worktree_id: &str) -> Result<Option<Assignment>> {
+fn read_registry(blocks: &Path) -> Result<Vec<Assignment>> {
+    let mut assignments = Vec::new();
     if !blocks.exists() {
-        return Ok(None);
+        return Ok(assignments);
     }
     for entry in
         std::fs::read_dir(blocks).with_context(|| format!("reading {}", blocks.display()))?
@@ -288,11 +331,15 @@ fn find_assignment(blocks: &Path, repo_key: &str, worktree_id: &str) -> Result<O
         let Ok(assignment) = serde_json::from_str::<Assignment>(&raw) else {
             continue;
         };
-        if assignment.repo_key == repo_key && assignment.worktree_id == worktree_id {
-            return Ok(Some(assignment));
-        }
+        assignments.push(assignment);
     }
-    Ok(None)
+    Ok(assignments)
+}
+
+fn find_assignment(blocks: &Path, repo_key: &str, worktree_id: &str) -> Result<Option<Assignment>> {
+    Ok(read_registry(blocks)?.into_iter().find(|assignment| {
+        assignment.repo_key == repo_key && assignment.worktree_id == worktree_id
+    }))
 }
 
 fn block_path(blocks: &Path, base: u16) -> PathBuf {
