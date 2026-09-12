@@ -170,6 +170,14 @@ fn gc_stops_host_processes_whose_checkout_is_gone() {
     assert!(run::is_alive(pid), "the fixture process is running");
 
     std::fs::remove_dir_all(&worktree).expect("delete checkout");
+
+    // A dry run reports the reclamation without performing any of it: stopping a
+    // process is the least reversible thing gc does.
+    worktrees::gc(&paths, &repo, STOP_TIMEOUT, false).expect("dry run");
+    assert!(run::is_alive(pid), "a dry run must not stop the process");
+    assert!(runtime.exists(), "a dry run must not drop the state");
+    assert_eq!(block_count(&state), 2, "a dry run must not release the block");
+
     worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
 
     assert!(!run::is_alive(pid), "the orphaned process is stopped");
