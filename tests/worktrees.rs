@@ -1,0 +1,294 @@
+//! Worktree lifecycle and `gc` reclamation, against real git repositories.
+
+mod support;
+
+use magictree::config::Config;
+use magictree::paths::Paths;
+use magictree::ports::{self, PortRequest};
+use magictree::repo::Repo;
+use magictree::worktrees;
+use support::Fixture;
+
+fn paths(fixture: &Fixture) -> Paths {
+    let state = fixture.state_dir();
+    Paths {
+        state_dir: state.clone(),
+        config_dir: state,
+    }
+}
+
+fn request(name: &str) -> PortRequest {
+    PortRequest {
+        name: name.to_string(),
+        prefer: None,
+        require: None,
+    }
+}
+
+/// A repository with one worktree, both holding port assignments.
+fn repo_with_wt(name: &str) -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.git_repo();
+
+    let path = fixture.git(&["worktree", "add", "-q", name, "-b", name]);
+    assert!(path.status.success(), "git worktree add");
+    let worktree = fixture.join(name);
+
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let main = Repo::open(fixture.path()).expect("main repo");
+    ports::ensure(
+        &paths,
+        &config,
+        &main.key(),
+        &main.worktree_id(),
+        &main.worktree_root,
+        &[request("web")],
+    )
+    .expect("main assignment");
+
+    let linked = Repo::open(&worktree).expect("linked repo");
+    ports::ensure(
+        &paths,
+        &config,
+        &linked.key(),
+        &linked.worktree_id(),
+        &linked.worktree_root,
+        &[request("web")],
+    )
+    .expect("worktree assignment");
+
+    (fixture, worktree, paths.state_dir.clone())
+}
+
+fn block_count(state: &std::path::Path) -> usize {
+    std::fs::read_dir(state.join("blocks"))
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn gc_keeps_blocks_for_worktrees_that_still_exist() {
+    let (fixture, _worktree, state) = repo_with_wt("keeper");
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    assert_eq!(block_count(&state), 2);
+    worktrees::gc(&paths(&fixture), &repo, true).expect("gc");
+    assert_eq!(block_count(&state), 2, "live worktrees keep their ports");
+
+    let main_repo = Repo::open(fixture.path()).expect("repo");
+    let main_id = main_repo.worktree_id();
+    assert!(
+        ports::load(&paths(&fixture), &main_repo.key(), &main_id)
+            .expect("load")
+            .is_some(),
+        "the primary checkout keeps its assignment"
+    );
+}
+
+#[test]
+fn gc_dry_run_reports_without_releasing() {
+    let (fixture, worktree, state) = repo_with_wt("ghost");
+    std::fs::remove_dir_all(&worktree).expect("delete checkout behind git's back");
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    worktrees::gc(&paths(&fixture), &repo, false).expect("dry run");
+    assert_eq!(block_count(&state), 2, "a dry run releases nothing");
+
+    worktrees::gc(&paths(&fixture), &repo, true).expect("apply");
+    assert_eq!(
+        block_count(&state),
+        1,
+        "the deleted worktree's block is reclaimed"
+    );
+
+    // The checkout is gone, so git's registration is stale too.
+    worktrees::prune(&repo, false).expect("prune");
+    let listed = String::from_utf8_lossy(&fixture.git(&["worktree", "list"]).stdout).to_string();
+    assert!(
+        !listed.contains("ghost"),
+        "prune drops the registration of a deleted checkout: {listed}"
+    );
+}
+
+#[test]
+fn gc_is_idempotent() {
+    let (fixture, worktree, state) = repo_with_wt("ghost");
+    std::fs::remove_dir_all(&worktree).expect("delete checkout");
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    worktrees::gc(&paths(&fixture), &repo, true).expect("first");
+    worktrees::gc(&paths(&fixture), &repo, true).expect("second");
+    assert_eq!(block_count(&state), 1);
+}
+
+#[test]
+fn the_generated_override_labels_the_repository_that_owns_it() {
+    // gc sweeps by this label, so a run in one repository cannot collect
+    // another repository's worktree containers.
+    use magictree::compose::{write_override, ComposeGroup, GroupService, PortMapping};
+    use magictree::manifest::Expose;
+
+    let fixture = Fixture::new();
+    let runtime = fixture.join(".magictree");
+    std::fs::create_dir_all(&runtime).expect("runtime dir");
+    let group = ComposeGroup {
+        file: fixture.join("compose.yaml"),
+        project: "wt".to_string(),
+        worktree_path: "/tmp/some-worktree".to_string(),
+        repo_key: "deadbeef".to_string(),
+        services: vec![GroupService {
+            name: "api".to_string(),
+            expose: Expose::Port,
+            mappings: vec![PortMapping {
+                host: Some(25000),
+                target: Some(8000),
+            }],
+        }],
+    };
+    let path = write_override(&runtime, &group).expect("write override");
+    let contents = std::fs::read_to_string(path).expect("read override");
+
+    assert!(
+        contents.contains("magictree.repo: \"deadbeef\""),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("magictree.worktree: \"/tmp/some-worktree\""),
+        "{contents}"
+    );
+    assert!(
+        contents.contains("127.0.0.1:25000:8000"),
+        "the allocated port is published on loopback: {contents}"
+    );
+}
+
+#[test]
+fn gc_leaves_other_repositories_alone() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    fixture.write("magictree.toml", "version = 1\n");
+    fixture.git_repo();
+
+    ports::ensure(
+        &paths,
+        &config,
+        "another-repo",
+        "some-worktree",
+        fixture.path(),
+        &[request("web")],
+    )
+    .expect("foreign assignment");
+
+    let repo = Repo::open(fixture.path()).expect("repo");
+    worktrees::gc(&paths, &repo, true).expect("gc");
+
+    assert_eq!(
+        block_count(&paths.state_dir),
+        1,
+        "blocks belonging to another repository must survive"
+    );
+}
+
+#[test]
+fn listing_reports_each_linked_worktree_with_its_ports() {
+    let (fixture, _worktree, _state) = repo_with_wt("feature");
+    let repo = Repo::open(fixture.path()).expect("repo");
+    let rows = worktrees::worktree_rows(&repo, &paths(&fixture)).expect("rows");
+
+    assert_eq!(rows.len(), 1, "only the linked worktree is listed");
+    let (id, path, ports) = &rows[0];
+    assert_eq!(id, "feature");
+    assert!(path.ends_with("feature"));
+    assert!(
+        ports.contains("web="),
+        "worktree {id} should report its port, got {ports:?}"
+    );
+}
+
+/// Every row `list` prints must name a worktree `rm` accepts. The primary
+/// checkout has no administrative directory, so it is not a removable worktree
+/// and must not appear.
+#[test]
+fn every_listed_worktree_is_removable() {
+    let (fixture, _worktree, state) = repo_with_wt("feature");
+    let listed = support::run(&["list"], fixture.path(), &state);
+    assert!(listed.ok(), "{}", listed.combined());
+
+    let ids: Vec<String> = listed
+        .stdout
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["feature".to_string()],
+        "list should show only the linked worktree, got:\n{}",
+        listed.stdout
+    );
+
+    for id in &ids {
+        let dry = support::run(&["--dry-run", "rm", id], fixture.path(), &state);
+        assert!(
+            dry.ok(),
+            "list advertised '{id}' but rm refuses it: {}",
+            dry.combined()
+        );
+    }
+}
+
+#[test]
+fn worktree_paths_are_recorded_for_later_reclamation() {
+    let (fixture, worktree, _state) = repo_with_wt("recorded");
+    let linked = Repo::open(&worktree).expect("repo");
+    let assignment = ports::load(&paths(&fixture), &linked.key(), &linked.worktree_id())
+        .expect("load")
+        .expect("assignment");
+
+    let recorded = assignment
+        .worktree_path
+        .expect("the owning path is recorded so gc can match it");
+    assert!(
+        recorded.ends_with("recorded"),
+        "recorded path {recorded} should point at the worktree"
+    );
+}
+
+#[test]
+fn remove_refuses_a_dirty_worktree_unless_forced() {
+    let (fixture, worktree, _state) = repo_with_wt("dirty");
+    std::fs::write(worktree.join("untracked.txt"), "x").expect("dirty the worktree");
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    let error = worktrees::remove(&repo, &worktree, false).expect_err("must refuse");
+    assert!(error.to_string().contains("--force"), "{error}");
+    assert!(
+        worktree.exists(),
+        "a refused removal leaves the worktree alone"
+    );
+
+    worktrees::remove(&repo, &worktree, true).expect("forced removal");
+    assert!(!worktree.exists());
+    let branches = fixture.git(&["branch", "--list", "dirty"]);
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).contains("dirty"),
+        "removing a worktree never deletes the branch"
+    );
+}
+
+#[test]
+fn remove_refuses_the_current_worktree() {
+    let fixture = Fixture::new();
+    fixture.write("magictree.toml", "version = 1\n");
+    fixture.git_repo();
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    let error = worktrees::remove(&repo, fixture.path(), true).expect_err("must refuse");
+    assert!(error.to_string().contains("current worktree"), "{error}");
+}

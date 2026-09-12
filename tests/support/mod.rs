@@ -1,0 +1,167 @@
+//! Shared helpers for integration tests.
+//!
+//! Not every test binary uses every helper.
+#![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+pub struct Fixture {
+    pub dir: tempfile::TempDir,
+    /// State lives outside the repository, as on a real machine, so it can
+    /// never show up as an untracked change.
+    state: tempfile::TempDir,
+}
+
+impl Fixture {
+    pub fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().expect("temp dir"),
+            state: tempfile::tempdir().expect("temp state dir"),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    pub fn join(&self, relative: &str) -> PathBuf {
+        self.dir.path().join(relative)
+    }
+
+    pub fn write(&self, relative: &str, contents: &str) {
+        let path = self.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(&path, contents).expect("write fixture file");
+    }
+
+    pub fn mkdir(&self, relative: &str) {
+        std::fs::create_dir_all(self.join(relative)).expect("create dir");
+    }
+
+    /// Initialise a git repository with one commit so worktree commands work.
+    pub fn git_repo(&self) {
+        self.git(&["init", "-q"]);
+        self.git(&["add", "-A"]);
+        self.git(&[
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+    }
+
+    pub fn git(&self, args: &[&str]) -> Output {
+        Command::new("git")
+            .arg("-C")
+            .arg(self.path())
+            .args(args)
+            .output()
+            .expect("run git")
+    }
+
+    /// A state directory isolated from the developer's real one, and from the
+    /// repository under test.
+    pub fn state_dir(&self) -> PathBuf {
+        self.state.path().to_path_buf()
+    }
+}
+
+/// The binary under test, built by cargo for this test run.
+pub fn bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_magictree"))
+}
+
+pub struct Run {
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Run {
+    pub fn ok(&self) -> bool {
+        self.status == 0
+    }
+
+    pub fn combined(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+}
+
+/// Run the binary with an isolated state directory.
+pub fn run(args: &[&str], cwd: &Path, state: &Path) -> Run {
+    let output = Command::new(bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("MAGICTREE_STATE_DIR", state)
+        .env("MAGICTREE_CONFIG_DIR", state.join("config"))
+        .output()
+        .expect("run magictree");
+    Run {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    }
+}
+
+/// True when a program is runnable, used to skip tests that need it.
+pub fn have(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// A port that was free a moment ago. Allocation tests use this to make a
+/// deliberate conflict rather than hard-coding a number.
+pub fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    listener.local_addr().expect("addr").port()
+}
+
+/// Occupy a port until the returned guard is dropped.
+///
+/// Test binaries each own a separate state directory, so their allocators are
+/// independent and can choose the same port. If the port is already taken the
+/// premise of the test — that it is unavailable — still holds, so that is not
+/// an error.
+pub struct PortGuard {
+    listener: Option<std::net::TcpListener>,
+    port: u16,
+}
+
+impl PortGuard {
+    pub fn occupy(port: u16) -> Self {
+        match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            // Port 0 asks the OS for any free port; report which one it gave.
+            Ok(listener) => {
+                let actual = listener
+                    .local_addr()
+                    .map(|address| address.port())
+                    .unwrap_or(port);
+                Self {
+                    listener: Some(listener),
+                    port: actual,
+                }
+            }
+            Err(_) => Self {
+                listener: None,
+                port,
+            },
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn held(&self) -> bool {
+        self.listener.is_some()
+    }
+}
