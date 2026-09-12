@@ -9,6 +9,7 @@ use magictree::repo::Repo;
 use magictree::run;
 use magictree::worktrees;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 use support::Fixture;
 
@@ -132,20 +133,13 @@ fn gc_is_idempotent() {
     assert_eq!(block_count(&state), 1);
 }
 
-#[test]
-fn gc_stops_host_processes_whose_checkout_is_gone() {
-    // Nothing can read a deleted checkout's pid files, so the state dir is the
-    // only surviving record that a process is still running. This is what a
-    // worktree removed outside magictree leaves behind.
-    let (fixture, worktree, state) = repo_with_wt("ghost");
-    let paths = paths(&fixture);
-    let repo = Repo::open(fixture.path()).expect("repo");
-    let linked = Repo::open(&worktree).expect("linked repo");
-
+/// Runtime state for a worktree, as `up` leaves it: an owner record plus a
+/// supervised process. Returns the state directory and the process id.
+fn runtime_with_process(paths: &Paths, linked: &Repo, fixture: &Fixture) -> (PathBuf, i32) {
     let runtime = paths.worktree_dir(&linked.key(), &linked.worktree_id());
     std::fs::create_dir_all(&runtime).expect("runtime dir");
     let assignment = ports::ensure(
-        &paths,
+        paths,
         &Config::default(),
         &linked.key(),
         &linked.worktree_id(),
@@ -158,15 +152,62 @@ fn gc_stops_host_processes_whose_checkout_is_gone() {
         serde_json::to_string(&assignment).expect("json"),
     )
     .expect("ports.json");
+    let pid = run::start(&runtime, "web", "sleep 300", fixture.path(), &BTreeMap::new())
+        .expect("start");
+    (runtime, pid)
+}
 
-    let pid = run::start(
-        &runtime,
-        "web",
-        "sleep 300",
-        fixture.path(),
-        &BTreeMap::new(),
-    )
-    .expect("start");
+#[test]
+fn gc_all_reclaims_a_repository_that_is_gone() {
+    // A repository-scoped sweep needs the repository. This is the case it cannot
+    // reach: the repository itself has been deleted, and the records are all
+    // that is left of it.
+    let (fixture, worktree, state) = repo_with_wt("ghost");
+    let paths = paths(&fixture);
+    let linked = Repo::open(&worktree).expect("linked repo");
+    let repo_key = linked.key();
+    let (runtime, pid) = runtime_with_process(&paths, &linked, &fixture);
+    assert!(run::is_alive(pid));
+
+    std::fs::remove_dir_all(&worktree).expect("delete checkout");
+    worktrees::gc_all(&paths, STOP_TIMEOUT, true).expect("gc --all");
+
+    assert!(!run::is_alive(pid), "the orphaned process is stopped");
+    assert!(!runtime.exists(), "its state is dropped");
+    assert_eq!(block_count(&state), 1, "its block is released");
+    assert!(
+        !paths.worktrees_dir().join(&repo_key).exists(),
+        "the emptied repository directory is dropped too"
+    );
+}
+
+#[test]
+fn gc_all_keeps_the_block_of_a_checkout_that_still_exists() {
+    // The safety half: sweeping without a repository must not treat a live
+    // checkout as a leftover, or it would reclaim the port of a running stack.
+    let (fixture, worktree, state) = repo_with_wt("kept");
+    let paths = paths(&fixture);
+
+    worktrees::gc_all(&paths, STOP_TIMEOUT, true).expect("gc --all");
+
+    assert_eq!(
+        block_count(&state),
+        2,
+        "both the primary checkout and the linked worktree are still live"
+    );
+    assert!(worktree.exists());
+}
+
+#[test]
+fn gc_stops_host_processes_whose_checkout_is_gone() {
+    // Nothing can read a deleted checkout's pid files, so the state dir is the
+    // only surviving record that a process is still running. This is what a
+    // worktree removed outside magictree leaves behind.
+    let (fixture, worktree, state) = repo_with_wt("ghost");
+    let paths = paths(&fixture);
+    let repo = Repo::open(fixture.path()).expect("repo");
+    let linked = Repo::open(&worktree).expect("linked repo");
+    let (runtime, pid) = runtime_with_process(&paths, &linked, &fixture);
     assert!(run::is_alive(pid), "the fixture process is running");
 
     std::fs::remove_dir_all(&worktree).expect("delete checkout");
