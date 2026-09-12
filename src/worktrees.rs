@@ -5,7 +5,7 @@ use crate::repo::Repo;
 use crate::run;
 use crate::slug::slugify;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -334,13 +334,15 @@ pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<
     if released == 0 {
         println!("no stale port blocks for this repository");
     }
-    sweep_worktree_state(paths, repo, &live, timeout, apply)?;
-    sweep_compose(&live, &repo.key(), apply)?;
+    let projects = sweep_worktree_state(paths, repo, &live, timeout, apply)?;
+    sweep_compose(&live, &repo.key(), &projects, apply)?;
     Ok(())
 }
 
 /// Stop the supervised processes of worktrees whose checkout is gone, then drop
-/// their state directories.
+/// their state directories. Returns the compose project names those worktrees
+/// recorded, which is the only way to reach a project whose containers are
+/// already gone.
 ///
 /// This is the half of `gc` that cannot be done from the checkout: the checkout
 /// has been deleted, so the state dir is the only surviving record of what was
@@ -352,8 +354,9 @@ fn sweep_worktree_state(
     live: &[PathBuf],
     timeout: Duration,
     apply: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let root = paths.worktrees_dir().join(repo.key());
+    let mut projects = Vec::new();
     let mut stale = 0usize;
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
@@ -373,6 +376,7 @@ fn sweep_worktree_state(
                 continue;
             }
             stale += 1;
+            projects.extend(recorded_project(&dir));
             for (name, pid) in run::recorded(&dir) {
                 if run::is_alive(pid) {
                     println!(
@@ -391,7 +395,7 @@ fn sweep_worktree_state(
     if stale == 0 {
         println!("no stale worktree state for this repository");
     }
-    Ok(())
+    Ok(projects)
 }
 
 /// The checkout a state directory describes, from its own `ports.json`.
@@ -400,46 +404,63 @@ fn state_owner(dir: &Path) -> Option<String> {
     serde_json::from_str::<Assignment>(&raw).ok()?.worktree_path
 }
 
-/// Remove containers and volumes labelled for worktrees that no longer exist.
+/// The compose project a worktree last ran, from the environment `up` wrote.
+fn recorded_project(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("env")).ok()?;
+    raw.lines()
+        .find_map(|line| line.strip_prefix("COMPOSE_PROJECT_NAME="))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Remove containers and volumes of worktrees that no longer exist.
 /// Resources of unrelated projects are never touched.
-fn sweep_compose(live: &[PathBuf], repo_key: &str, apply: bool) -> Result<()> {
+///
+/// `recorded` carries the compose project names of dead worktrees, because a
+/// project whose containers are already gone (a manual `docker compose down`
+/// without `-v`, say) is otherwise invisible.
+fn sweep_compose(
+    live: &[PathBuf],
+    repo_key: &str,
+    recorded: &[String],
+    apply: bool,
+) -> Result<()> {
     // Scoped to this repository: another repository's worktrees are not ours to
     // decide about, however stale their paths look from here.
     let filter = format!("label=magictree.repo={repo_key}");
-    let Some(containers) = docker_ids(&[
+    let mut owner_projects: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Some(containers) = docker_ids(&[
         "ps",
         "-a",
         "--filter",
         &filter,
         "--format",
         "{{.ID}}\t{{.Label \"magictree.worktree\"}}\t{{.Label \"magictree.project\"}}",
-    ])?
-    else {
-        return Ok(());
-    };
-
-    let mut owner_projects: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for line in containers.lines().filter(|line| !line.trim().is_empty()) {
-        let mut parts = line.split('\t');
-        let Some(id) = parts.next() else { continue };
-        let owner = parts.next().unwrap_or_default().to_string();
-        let project = parts.next().unwrap_or_default().to_string();
-        if owner.is_empty() {
-            continue;
+    ])? {
+        for line in containers.lines().filter(|line| !line.trim().is_empty()) {
+            let mut parts = line.split('\t');
+            let Some(id) = parts.next() else { continue };
+            let owner = parts.next().unwrap_or_default().to_string();
+            let project = parts.next().unwrap_or_default().to_string();
+            if owner.is_empty() {
+                continue;
+            }
+            if live
+                .iter()
+                .any(|path| same_worktree(path, Path::new(&owner)))
+            {
+                continue;
+            }
+            owner_projects
+                .entry(project)
+                .or_default()
+                .push(id.to_string());
         }
-        if live
-            .iter()
-            .any(|path| same_worktree(path, Path::new(&owner)))
-        {
-            continue;
-        }
-        owner_projects
-            .entry(project)
-            .or_default()
-            .push(id.to_string());
     }
 
-    if owner_projects.is_empty() {
+    let mut projects: BTreeSet<String> = owner_projects.keys().cloned().collect();
+    projects.extend(recorded.iter().cloned());
+    if projects.is_empty() {
         println!("no orphaned compose containers for this repository");
         return Ok(());
     }
@@ -457,34 +478,29 @@ fn sweep_compose(live: &[PathBuf], repo_key: &str, apply: bool) -> Result<()> {
         }
     }
 
-    let Some(volumes) = docker_ids(&[
-        "volume",
-        "ls",
-        "--filter",
-        &filter,
-        "--format",
-        "{{.Name}}\t{{.Label \"magictree.worktree\"}}",
-    ])?
-    else {
-        return Ok(());
-    };
-    for line in volumes.lines().filter(|line| !line.trim().is_empty()) {
-        let mut parts = line.split('\t');
-        let (Some(name), Some(owner)) = (parts.next(), parts.next()) else {
+    // Volumes are looked up through their project, not through `magictree.repo`:
+    // compose labels volumes with its own keys and a service label never reaches
+    // them, so a label filter matched nothing and every volume survived gc.
+    for project in &projects {
+        let filter = format!("label=com.docker.compose.project={project}");
+        let Some(volumes) =
+            docker_ids(&["volume", "ls", "--filter", &filter, "--format", "{{.Name}}"])?
+        else {
             continue;
         };
-        if live
-            .iter()
-            .any(|path| same_worktree(path, Path::new(owner)))
-        {
-            continue;
-        }
-        println!(
-            "{} volume {name}",
-            if apply { "removing" } else { "would remove" }
-        );
-        if apply {
-            docker_run(&["volume", "rm", name])?;
+        for name in volumes.lines().filter(|line| !line.trim().is_empty()) {
+            let name = name.trim();
+            println!(
+                "{} volume {name}",
+                if apply { "removing" } else { "would remove" }
+            );
+            if apply {
+                if let Err(error) = docker_run(&["volume", "rm", name]) {
+                    // A volume still attached to a container of another project
+                    // is not ours to force: report it and reclaim the rest.
+                    println!("could not remove volume {name}: {error}");
+                }
+            }
         }
     }
     Ok(())
