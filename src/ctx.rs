@@ -2,7 +2,7 @@ use crate::compose::{self, ComposeGroup, ComposeRunner, GroupService, PortMappin
 use crate::config::Config;
 use crate::env::{self, EnvPlan};
 use crate::manifest::{self, Bootstrap, Expose, Loaded, Node, Runtime, When};
-use crate::paths::Paths;
+use crate::paths::{self, Paths};
 use crate::ports::{self, Assignment, PortRequest};
 use crate::repo::Repo;
 use crate::run;
@@ -26,6 +26,30 @@ fn render_placeholder(port: u16) -> String {
     } else {
         port.to_string()
     }
+}
+
+/// Where runtime state lived before it moved into magictree's own state dir.
+/// Kept only so a stack started before the upgrade stays stoppable.
+pub fn legacy_runtime_dir(repo: &Repo) -> PathBuf {
+    repo.worktree_root.join(".magictree")
+}
+
+/// Runtime state for one worktree, wherever it currently lives: the state dir
+/// once adopted, otherwise a pre-migration `<checkout>/.magictree`, otherwise
+/// the state dir.
+///
+/// Reads resolve through here so `down`, `status` and `logs` still find a stack
+/// that was started by an older build; `up` then adopts the directory.
+pub fn runtime_dir_for(paths: &Paths, repo: &Repo) -> PathBuf {
+    let current = paths.worktree_dir(&repo.key(), &repo.worktree_id());
+    if current.exists() {
+        return current;
+    }
+    let legacy = legacy_runtime_dir(repo);
+    if legacy.exists() {
+        return legacy;
+    }
+    current
 }
 
 pub struct Ctx {
@@ -56,7 +80,7 @@ impl Ctx {
         let nodes = manifest::nodes(&loaded);
         let edges = manifest::dependencies(&nodes)?;
         let slug = slugify(&repo.worktree_id());
-        let runtime_dir = repo.worktree_root.join(".magictree");
+        let runtime_dir = runtime_dir_for(&paths, &repo);
         Ok(Self {
             paths,
             config,
@@ -67,6 +91,24 @@ impl Ctx {
             edges,
             slug,
         })
+    }
+
+    /// Move pre-migration runtime state into the state dir, so runtime state has
+    /// exactly one home from here on. Idempotent.
+    ///
+    /// Called by the commands that write runtime state, never by a dry run and
+    /// never by a read: moving a directory is a side effect a `status` should
+    /// not have.
+    pub fn adopt_legacy_runtime(&mut self) -> Result<()> {
+        let current = self
+            .paths
+            .worktree_dir(&self.repo.key(), &self.repo.worktree_id());
+        if self.runtime_dir == current {
+            return Ok(());
+        }
+        paths::move_dir(&self.runtime_dir, &current)?;
+        self.runtime_dir = current;
+        Ok(())
     }
 
     pub fn ensure_runtime_dirs(&self) -> Result<()> {

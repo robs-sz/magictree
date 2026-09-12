@@ -1,7 +1,7 @@
 use crate::bootstrap;
 use crate::compose::{self, ComposeRunner, ContainerState};
 use crate::config::Config;
-use crate::ctx::Ctx;
+use crate::ctx::{runtime_dir_for, Ctx};
 use crate::discover;
 use crate::doctor;
 use crate::dryrun;
@@ -521,9 +521,9 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
         // Nothing to start, and the generic "no magictree.toml" would not say why.
         bail!("{} has no stack definition\n\n{hint}", path.display());
     }
-    let ctx = Ctx::load(&path)?;
+    let mut ctx = Ctx::load(&path)?;
     let selection = ctx.scope(&[], &[], false)?;
-    ensure(&ctx, &selection).map(|_| ())
+    ensure(&mut ctx, &selection).map(|_| ())
 }
 
 fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
@@ -546,7 +546,7 @@ fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
         // Stop whatever this worktree recorded, even if its manifest is gone or
         // no longer parses. Without this the checkout disappears while its
         // processes keep running and their pid files with it.
-        let runtime_dir = target.join(".magictree");
+        let runtime_dir = runtime_dir_for(&Paths::new()?, &Repo::open(&target)?);
         match ctx_stop_recorded(&runtime_dir) {
             Ok(stopped) => {
                 for name in stopped {
@@ -587,12 +587,18 @@ fn cmd_list(args: ListArgs) -> Result<()> {
 
 fn cmd_gc(args: GcArgs, dry_run: bool) -> Result<()> {
     let paths = Paths::new()?;
+    let config = Config::load(&paths)?;
     let repo = Repo::open(&resolve_cwd(args.cwd)?)?;
     let apply = !dry_run;
     if !apply {
         println!("dry run — nothing is released");
     }
-    worktrees::gc(&paths, &repo, apply)?;
+    worktrees::gc(
+        &paths,
+        &repo,
+        Duration::from_secs(config.stop_timeout_secs),
+        apply,
+    )?;
     if args.prune {
         worktrees::prune(&repo, !apply)?;
     }
@@ -643,17 +649,17 @@ fn resolve_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
 }
 
 fn cmd_up(args: UpArgs, dry_run: bool) -> Result<()> {
-    let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
+    let mut ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     let selection = ctx.scope(&args.services, &args.apps, args.all)?;
     if dry_run {
         return dryrun::up(&ctx, &selection);
     }
-    ensure(&ctx, &selection).map(|_| ())
+    ensure(&mut ctx, &selection).map(|_| ())
 }
 
 /// The idempotent core: allocate ports, materialise env, bootstrap, then start
 /// services in dependency order, waiting for each to become healthy.
-fn ensure(ctx: &Ctx, selection: &[usize]) -> Result<ports::Assignment> {
+fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
     // Every service gets an assignment, not just the selected ones: a later
     // partial `up` still has to write an override for its dependencies, and a
     // stable worktree-wide assignment is easier to reason about.
@@ -666,7 +672,7 @@ fn ensure(ctx: &Ctx, selection: &[usize]) -> Result<ports::Assignment> {
         &ctx.repo.worktree_root,
         &ctx.port_requests(&all_services),
     )?;
-    ctx.repo.ensure_excluded()?;
+    ctx.adopt_legacy_runtime()?;
     ctx.ensure_runtime_dirs()?;
 
     let mirror = ctx.build_env(None, &assignment)?;

@@ -63,14 +63,19 @@ processes. Bootstrap steps with `inputs` are skipped when those files are unchan
 | | |
 |---|---|
 | `magictree.toml` | committed per app; a root one with `[workspace]` for monorepos |
-| `<worktree>/.magictree/` | generated: `env`, `ports.json`, `run/`, `log/` |
-| `~/.local/state/magictree/` | machine-wide port assignments |
+| `~/.local/state/magictree/blocks/` | machine-wide port assignments |
+| `~/.local/state/magictree/worktrees/<repo>/<worktree>/` | generated per worktree: `env`, `ports.json`, `run/`, `log/` |
 | `~/.config/magictree/config.toml` | optional: port range, timeouts |
 
 Ports come from `20000-32767`, are stable across restarts, and are never user-visible
 inside containers — compose services reach each other over compose DNS.
 
-Generated state is ignored through `git/info/exclude`, so it never appears in `git status`.
+Generated state lives in magictree's own state dir, keyed by repository and worktree, so
+**nothing is ever written into the checkout** and `git status` stays clean without any
+`.gitignore` or `git/info/exclude` entry. Keeping it out of the checkout is also what lets
+`gc` stop a worktree's host processes after the checkout is gone; `up` adopts state left
+in a `<worktree>/.magictree/` by an older build.
+
 magictree never writes to repository `.env` files.
 
 ## Agents

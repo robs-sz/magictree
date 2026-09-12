@@ -7,23 +7,29 @@
 mod support;
 
 use std::time::{Duration, Instant};
-use support::{have, run, Fixture};
+use support::{have, run, runtime_dirs, Fixture};
 
+/// A host-process stack. Bootstrap writes into the state dir on purpose: a
+/// checkout must come out of a run with nothing new in it.
 fn host_stack_fixture() -> Fixture {
     let fixture = Fixture::new();
+    let marker = fixture.state_dir().join("boot.txt");
     fixture.write(
         "magictree.toml",
-        r#"
+        &format!(
+            r#"
 version = 1
 
 [bootstrap]
-run = ["echo bootstrapped > .magictree/boot.txt"]
+run = ["echo bootstrapped > '{}'"]
 
 [[services]]
 id = "idle"
 command = "sleep 300"
-port = { env = "PORT" }
+port = {{ env = "PORT" }}
 "#,
+            marker.display()
+        ),
     );
     fixture.git_repo();
     fixture
@@ -41,6 +47,10 @@ fn dry_run_creates_nothing() {
     assert!(
         !fixture.join(".magictree").exists(),
         "a dry run must not create the runtime directory"
+    );
+    assert!(
+        runtime_dirs(&state).is_empty(),
+        "a dry run must not claim any worktree state"
     );
     assert_eq!(
         std::fs::read_dir(state.join("blocks"))
@@ -70,7 +80,8 @@ fn up_status_ports_down_round_trip() {
     assert!(up.ok(), "{}", up.combined());
     assert!(up.stdout.contains("idle: started"), "{}", up.stdout);
 
-    // `.magictree/` is kept out of git status without touching .gitignore.
+    // Runtime state lives in magictree's own state dir, so the checkout is
+    // untouched by a run and there is nothing to keep out of git status.
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(fixture.path())
@@ -79,11 +90,13 @@ fn up_status_ports_down_round_trip() {
     assert_eq!(
         String::from_utf8_lossy(&status.stdout).trim(),
         "",
-        "generated state must not appear as an untracked change"
+        "a run must leave the checkout untouched"
     );
-    assert!(fixture.join(".magictree/ports.json").exists());
+    let runtime = runtime_dirs(&state);
+    assert_eq!(runtime.len(), 1, "one worktree owns state: {runtime:?}");
+    assert!(runtime[0].join("ports.json").exists());
     assert!(
-        fixture.join(".magictree/boot.txt").exists(),
+        fixture.state_dir().join("boot.txt").exists(),
         "bootstrap ran"
     );
 
@@ -536,9 +549,12 @@ health = { tcp = true, timeout = 2 }
         "{}",
         up.stderr
     );
+    let runtime = runtime_dirs(&state);
+    let log = runtime[0].join("log/broken.log");
     assert!(
-        up.stderr.contains(".magictree/log/broken.log"),
-        "{}",
+        up.stderr.contains(&log.display().to_string()),
+        "the report names the service's log: {}\n{}",
+        log.display(),
         up.stderr
     );
 

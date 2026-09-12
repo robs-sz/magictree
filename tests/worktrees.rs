@@ -6,8 +6,14 @@ use magictree::config::Config;
 use magictree::paths::Paths;
 use magictree::ports::{self, PortRequest};
 use magictree::repo::Repo;
+use magictree::run;
 use magictree::worktrees;
+use std::collections::BTreeMap;
+use std::time::Duration;
 use support::Fixture;
+
+/// Any timeout works: every service here is a `sleep` that dies on SIGTERM.
+const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn paths(fixture: &Fixture) -> Paths {
     let state = fixture.state_dir();
@@ -77,7 +83,7 @@ fn gc_keeps_blocks_for_worktrees_that_still_exist() {
     let repo = Repo::open(fixture.path()).expect("repo");
 
     assert_eq!(block_count(&state), 2);
-    worktrees::gc(&paths(&fixture), &repo, true).expect("gc");
+    worktrees::gc(&paths(&fixture), &repo, STOP_TIMEOUT, true).expect("gc");
     assert_eq!(block_count(&state), 2, "live worktrees keep their ports");
 
     let main_repo = Repo::open(fixture.path()).expect("repo");
@@ -96,10 +102,10 @@ fn gc_dry_run_reports_without_releasing() {
     std::fs::remove_dir_all(&worktree).expect("delete checkout behind git's back");
     let repo = Repo::open(fixture.path()).expect("repo");
 
-    worktrees::gc(&paths(&fixture), &repo, false).expect("dry run");
+    worktrees::gc(&paths(&fixture), &repo, STOP_TIMEOUT, false).expect("dry run");
     assert_eq!(block_count(&state), 2, "a dry run releases nothing");
 
-    worktrees::gc(&paths(&fixture), &repo, true).expect("apply");
+    worktrees::gc(&paths(&fixture), &repo, STOP_TIMEOUT, true).expect("apply");
     assert_eq!(
         block_count(&state),
         1,
@@ -121,9 +127,69 @@ fn gc_is_idempotent() {
     std::fs::remove_dir_all(&worktree).expect("delete checkout");
     let repo = Repo::open(fixture.path()).expect("repo");
 
-    worktrees::gc(&paths(&fixture), &repo, true).expect("first");
-    worktrees::gc(&paths(&fixture), &repo, true).expect("second");
+    worktrees::gc(&paths(&fixture), &repo, STOP_TIMEOUT, true).expect("first");
+    worktrees::gc(&paths(&fixture), &repo, STOP_TIMEOUT, true).expect("second");
     assert_eq!(block_count(&state), 1);
+}
+
+#[test]
+fn gc_stops_host_processes_whose_checkout_is_gone() {
+    // Nothing can read a deleted checkout's pid files, so the state dir is the
+    // only surviving record that a process is still running. This is what a
+    // worktree removed outside magictree leaves behind.
+    let (fixture, worktree, state) = repo_with_wt("ghost");
+    let paths = paths(&fixture);
+    let repo = Repo::open(fixture.path()).expect("repo");
+    let linked = Repo::open(&worktree).expect("linked repo");
+
+    let runtime = paths.worktree_dir(&linked.key(), &linked.worktree_id());
+    std::fs::create_dir_all(&runtime).expect("runtime dir");
+    let assignment = ports::ensure(
+        &paths,
+        &Config::default(),
+        &linked.key(),
+        &linked.worktree_id(),
+        &linked.worktree_root,
+        &[request("web")],
+    )
+    .expect("assignment");
+    std::fs::write(
+        runtime.join("ports.json"),
+        serde_json::to_string(&assignment).expect("json"),
+    )
+    .expect("ports.json");
+
+    let pid = run::start(
+        &runtime,
+        "web",
+        "sleep 300",
+        fixture.path(),
+        &BTreeMap::new(),
+    )
+    .expect("start");
+    assert!(run::is_alive(pid), "the fixture process is running");
+
+    std::fs::remove_dir_all(&worktree).expect("delete checkout");
+    worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
+
+    assert!(!run::is_alive(pid), "the orphaned process is stopped");
+    assert!(!runtime.exists(), "and its state is dropped");
+    assert_eq!(block_count(&state), 1, "its port block is released too");
+}
+
+#[test]
+fn gc_keeps_state_it_cannot_attribute() {
+    // An unattributable directory must not be treated as somebody's leftovers:
+    // dropping it would be a guess about which checkout it described.
+    let (fixture, _worktree, state) = repo_with_wt("ghost");
+    let paths = paths(&fixture);
+    let repo = Repo::open(fixture.path()).expect("repo");
+    let stray = paths.state_dir.join("worktrees").join(repo.key()).join("mystery");
+    std::fs::create_dir_all(&stray).expect("stray dir");
+
+    worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
+    assert!(stray.exists(), "state with no recorded owner is left alone");
+    let _ = state;
 }
 
 #[test]
@@ -134,7 +200,7 @@ fn the_generated_override_labels_the_repository_that_owns_it() {
     use magictree::manifest::Expose;
 
     let fixture = Fixture::new();
-    let runtime = fixture.join(".magictree");
+    let runtime = fixture.join("runtime");
     std::fs::create_dir_all(&runtime).expect("runtime dir");
     let group = ComposeGroup {
         file: fixture.join("compose.yaml"),
@@ -186,7 +252,7 @@ fn gc_leaves_other_repositories_alone() {
     .expect("foreign assignment");
 
     let repo = Repo::open(fixture.path()).expect("repo");
-    worktrees::gc(&paths, &repo, true).expect("gc");
+    worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
 
     assert_eq!(
         block_count(&paths.state_dir),

@@ -72,6 +72,30 @@ impl Fixture {
     }
 }
 
+/// Every per-worktree runtime directory under a state dir, sorted.
+///
+/// Runtime state is keyed by repository and worktree rather than living in the
+/// checkout, so tests assert on the layout through this rather than guessing
+/// hashed directory names.
+pub fn runtime_dirs(state: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(repositories) = std::fs::read_dir(state.join("worktrees")) else {
+        return found;
+    };
+    for repository in repositories.flatten() {
+        let Ok(worktrees) = std::fs::read_dir(repository.path()) else {
+            continue;
+        };
+        for worktree in worktrees.flatten() {
+            if worktree.path().is_dir() {
+                found.push(worktree.path());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// The binary under test, built by cargo for this test run.
 pub fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_magictree"))

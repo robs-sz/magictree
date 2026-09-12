@@ -236,7 +236,11 @@ Common causes:
   containers: compose services talk to each other over compose DNS (`db:5432`), not over
   magictree ports. Publish a port only when the host needs to reach it.
 - `MAGICTREE_SLUG` is stable per worktree and is the default `COMPOSE_PROJECT_NAME`.
-- Generated state lives in `.magictree/` (ignored through `git/info/exclude`). It is safe
-  to delete; `up` rebuilds it. Never commit it.
-- `magictree gc` is the only command that reclaims ports and compose resources left by
-  deleted worktrees. Run it after removing checkouts outside magictree.
+- Generated state lives outside the checkout, in
+  `~/.local/state/magictree/worktrees/<repo>/<worktree>/`. A checkout is never written to,
+  so it needs no `.gitignore` or `git/info/exclude` entry. The state is safe to delete;
+  `up` rebuilds it.
+- `magictree gc` is the only command that reclaims what deleted worktrees left behind:
+  port blocks, compose containers and volumes, and the host processes whose pid files
+  only survive because the state is kept outside the checkout. Run it after removing
+  checkouts outside magictree.

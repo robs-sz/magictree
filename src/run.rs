@@ -117,16 +117,15 @@ pub fn stop(runtime_dir: &Path, name: &str, timeout: Duration) -> Result<bool> {
     Ok(true)
 }
 
-/// Stop every supervised process recorded in this worktree, including pid
-/// files left behind by services that no longer exist in the manifest.
-/// Returns `(name, was_running)` for each entry, sorted by name.
-pub fn stop_all(runtime_dir: &Path, timeout: Duration) -> Result<Vec<(String, bool)>> {
+/// Every supervised process this worktree recorded, including entries left by
+/// services that no longer exist in the manifest. Sorted by name.
+pub fn recorded(runtime_dir: &Path) -> Vec<(String, i32)> {
     let dir = runtime_dir.join("run");
-    let mut names: Vec<String> = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(Vec::new());
+    let mut entries = Vec::new();
+    let Ok(read) = std::fs::read_dir(&dir) else {
+        return entries;
     };
-    for entry in entries.flatten() {
+    for entry in read.flatten() {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("pid") {
             continue;
@@ -134,11 +133,20 @@ pub fn stop_all(runtime_dir: &Path, timeout: Duration) -> Result<Vec<(String, bo
         let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
             continue;
         };
-        names.push(name.to_string());
+        if let Some(pid) = read_pid(runtime_dir, name) {
+            entries.push((name.to_string(), pid));
+        }
     }
-    names.sort();
+    entries.sort();
+    entries
+}
+
+/// Stop every supervised process recorded in this worktree, including pid
+/// files left behind by services that no longer exist in the manifest.
+/// Returns `(name, was_running)` for each entry, sorted by name.
+pub fn stop_all(runtime_dir: &Path, timeout: Duration) -> Result<Vec<(String, bool)>> {
     let mut stopped = Vec::new();
-    for name in names {
+    for (name, _) in recorded(runtime_dir) {
         let running = stop(runtime_dir, &name, timeout)?;
         stopped.push((name, running));
     }

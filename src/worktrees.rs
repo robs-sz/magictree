@@ -2,12 +2,14 @@ use crate::paths::Paths;
 use crate::ports::{self, Assignment};
 use crate::repo::is_tracked;
 use crate::repo::Repo;
+use crate::run;
 use crate::slug::slugify;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Create a worktree for `branch` and return its path.
 ///
@@ -273,9 +275,9 @@ fn same_worktree(a: &Path, b: &Path) -> bool {
     key(&a) == key(&b) && a.parent().is_some()
 }
 
-/// Release port blocks whose worktree no longer exists, and report compose
-/// resources still labelled for them.
-pub fn gc(paths: &Paths, repo: &Repo, apply: bool) -> Result<()> {
+/// Release port blocks whose worktree no longer exists, stop the processes they
+/// left running, and report compose resources still labelled for them.
+pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<()> {
     // A checkout whose directory is gone is dead even when git still lists it,
     // because nothing can be running there. `--prune` clears the registration.
     let live: Vec<PathBuf> = repo
@@ -332,8 +334,70 @@ pub fn gc(paths: &Paths, repo: &Repo, apply: bool) -> Result<()> {
     if released == 0 {
         println!("no stale port blocks for this repository");
     }
+    sweep_worktree_state(paths, repo, &live, timeout, apply)?;
     sweep_compose(&live, &repo.key(), apply)?;
     Ok(())
+}
+
+/// Stop the supervised processes of worktrees whose checkout is gone, then drop
+/// their state directories.
+///
+/// This is the half of `gc` that cannot be done from the checkout: the checkout
+/// has been deleted, so the state dir is the only surviving record of what was
+/// running. State written before runtime state moved into the state dir died
+/// with its checkout and cannot be reclaimed — only reported as gone.
+fn sweep_worktree_state(
+    paths: &Paths,
+    repo: &Repo,
+    live: &[PathBuf],
+    timeout: Duration,
+    apply: bool,
+) -> Result<()> {
+    let root = paths.worktrees_dir().join(repo.key());
+    let mut stale = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            // Without an owner this state cannot be attributed to a checkout,
+            // and dropping it would be a guess.
+            let Some(owner) = state_owner(&dir) else {
+                continue;
+            };
+            if live
+                .iter()
+                .any(|path| same_worktree(path, Path::new(&owner)))
+            {
+                continue;
+            }
+            stale += 1;
+            for (name, pid) in run::recorded(&dir) {
+                if run::is_alive(pid) {
+                    println!(
+                        "{} {name} (pid {pid}) of worktree {owner}",
+                        if apply { "stopping" } else { "would stop" }
+                    );
+                }
+            }
+            if apply {
+                run::stop_all(&dir, timeout)?;
+                std::fs::remove_dir_all(&dir)
+                    .with_context(|| format!("removing {}", dir.display()))?;
+            }
+        }
+    }
+    if stale == 0 {
+        println!("no stale worktree state for this repository");
+    }
+    Ok(())
+}
+
+/// The checkout a state directory describes, from its own `ports.json`.
+fn state_owner(dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("ports.json")).ok()?;
+    serde_json::from_str::<Assignment>(&raw).ok()?.worktree_path
 }
 
 /// Remove containers and volumes labelled for worktrees that no longer exist.

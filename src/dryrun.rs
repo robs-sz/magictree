@@ -231,7 +231,6 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
     }
 
     println!("\n# would also");
-    println!("- register .magictree/ in (git common dir)/info/exclude if absent");
     println!("- write {}/env", ctx.runtime_dir.display());
     println!(
         "- claim a port block under {}/blocks",

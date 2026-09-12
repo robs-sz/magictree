@@ -109,27 +109,6 @@ impl Repo {
             })
             .unwrap_or_else(|| self.worktree_root.clone())
     }
-
-    /// Keep generated state out of `git status` without touching the user's
-    /// `.gitignore`. `info/exclude` lives in the common dir, so one write
-    /// covers every worktree of the repository.
-    pub fn ensure_excluded(&self) -> Result<()> {
-        let path = self.common_dir.join("info").join("exclude");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-        if content.lines().any(|line| line.trim() == ".magictree/") {
-            return Ok(());
-        }
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(".magictree/\n");
-        std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
-    }
 }
 
 /// Whether git tracks this path in the repository at `dir`. A manifest that is

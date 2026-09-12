@@ -423,7 +423,7 @@ wait = "exit"
         paths,
         config: magictree::Config::default(),
         repo: magictree::Repo::open(fixture.path()).expect("repo"),
-        runtime_dir: fixture.join(".magictree"),
+        runtime_dir: fixture.join("runtime"),
         loaded,
         nodes: all.clone(),
         edges,
