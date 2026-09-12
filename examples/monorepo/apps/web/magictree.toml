@@ -1,0 +1,23 @@
+version = 1
+
+[app]
+id = "web"
+
+[env]
+PUBLIC_URL = "http://localhost:${MAGICTREE_PORT_web_web}"
+
+[bootstrap]
+sync = ["node_modules"]
+run = [{ command = "pnpm install", inputs = ["pnpm-lock.yaml"] }]
+
+[[services]]
+id = "web"
+target = { kind = "pnpm", script = "dev" }
+port = { env = "PORT", prefer = 5173 }
+needs = ["db"]
+health = { http = "/", timeout = 60 }
+
+[jobs.migrate]
+run = "pnpm prisma migrate deploy"
+when = "up"
+needs = ["web"]

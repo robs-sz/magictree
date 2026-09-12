@@ -1,0 +1,54 @@
+version = 1
+
+[app]
+id = "shop"
+
+[env]
+PUBLIC_URL = "http://localhost:${MAGICTREE_PORT_web}"
+DATABASE_URL = "postgres://localhost:${MAGICTREE_PORT_db}/shop"
+
+[bootstrap]
+sync = ["node_modules", ".generated"]
+run = [{ command = "pnpm install", inputs = ["pnpm-lock.yaml"] }]
+
+[[services]]
+id = "db"
+runtime = "compose"
+compose = { file = "compose.yaml", service = "postgres" }
+port = { target = 5432, env = "WT_PORT_DB" }
+health = { tcp = true, timeout = 30 }
+
+[[services]]
+id = "web"
+target = { kind = "pnpm", script = "dev" }
+port = { env = "PORT", prefer = 5173 }
+needs = ["db"]
+health = { http = "/", timeout = 60 }
+
+[[services]]
+id = "api"
+command = "uv run uvicorn app.main:app --port $API_PORT --reload"
+ports = [
+  { name = "http", env = "API_PORT" },
+  { name = "metrics", env = "API_METRICS_PORT" },
+]
+needs = ["db"]
+health = { http = "/healthz", timeout = 60 }
+
+[[services]]
+id = "migrate-db"
+runtime = "compose"
+compose = { file = "compose.yaml", service = "migrate-db" }
+expose = "none"
+needs = ["db"]
+wait = "exit"
+
+[jobs.migrate]
+run = "pnpm prisma migrate deploy"
+when = "up"
+needs = ["db"]
+
+[jobs.seed]
+run = "pnpm prisma db seed"
+when = "manual"
+needs = ["migrate"]

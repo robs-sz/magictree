@@ -1,0 +1,25 @@
+version = 1
+
+[workspace]
+apps = ["apps/web", "apps/api"]
+
+[env]
+DATABASE_URL = "postgres://localhost:${MAGICTREE_PORT_db}/shop"
+
+[[services]]
+id = "db"
+runtime = "compose"
+compose = { file = "compose.yaml", service = "postgres" }
+port = { target = 5432, env = "WT_PORT_DB" }
+health = { tcp = true, timeout = 30 }
+
+[[services]]
+id = "redis"
+runtime = "compose"
+compose = { file = "compose.yaml", service = "redis" }
+expose = "none"
+
+[jobs.shared-seed]
+run = "pnpm db seed"
+when = "manual"
+needs = ["db"]

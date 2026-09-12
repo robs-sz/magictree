@@ -1,0 +1,11 @@
+[project]
+name = "api"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = ["fastapi", "uvicorn"]
+
+[project.scripts]
+dev = "app.main:main"
+
+[dependency-groups]
+dev = ["pytest"]
