@@ -12,6 +12,7 @@ pub mod discover;
 pub mod dryrun;
 pub mod env;
 pub mod health;
+pub mod init;
 pub mod manifest;
 pub mod paths;
 pub mod ports;
