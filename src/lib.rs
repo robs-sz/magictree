@@ -9,6 +9,7 @@ pub mod compose;
 pub mod config;
 pub mod ctx;
 pub mod discover;
+pub mod doctor;
 pub mod dryrun;
 pub mod env;
 pub mod health;
