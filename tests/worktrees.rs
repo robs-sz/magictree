@@ -407,3 +407,62 @@ fn remove_refuses_the_current_worktree() {
     let error = worktrees::remove(&repo, fixture.path(), true).expect_err("must refuse");
     assert!(error.to_string().contains("current worktree"), "{error}");
 }
+
+/// Git names a worktree's administrative directory after the checkout's
+/// basename, so a checkout at `.../main` is registered as `main` — the identity
+/// the primary checkout reserves. Left indistinguishable, the two would resolve
+/// to one port block, one runtime directory and one compose project.
+#[test]
+fn a_worktree_named_main_does_not_share_the_primary_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.git_repo();
+
+    let status = fixture.git(&["worktree", "add", "-q", "main", "-b", "collided"]);
+    assert!(status.status.success(), "git worktree add: {status:?}");
+    let worktree = fixture.join("main");
+
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let primary = Repo::open(fixture.path()).expect("primary repo");
+    let linked = Repo::open(&worktree).expect("linked repo");
+    assert_ne!(
+        linked.worktree_id(),
+        primary.worktree_id(),
+        "a linked worktree named main must not claim the primary's identity"
+    );
+
+    let primary_block = ports::ensure(
+        &paths,
+        &config,
+        &primary.key(),
+        &primary.worktree_id(),
+        &primary.worktree_root,
+        &[request("web")],
+    )
+    .expect("primary assignment");
+    let linked_block = ports::ensure(
+        &paths,
+        &config,
+        &linked.key(),
+        &linked.worktree_id(),
+        &linked.worktree_root,
+        &[request("web")],
+    )
+    .expect("linked assignment");
+
+    assert_ne!(primary_block.base, linked_block.base);
+    assert_eq!(block_count(&paths.state_dir), 2, "each worktree owns a block");
+
+    let rows = worktrees::worktree_rows(&primary, &paths).expect("rows");
+    assert_eq!(rows.len(), 1, "only the linked worktree is listed");
+    assert_eq!(
+        rows[0].0,
+        linked.worktree_id(),
+        "list must resolve the same identity the block was written under"
+    );
+    assert_ne!(rows[0].2, "-", "list must find the linked worktree's ports");
+}

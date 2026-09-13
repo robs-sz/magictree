@@ -1,7 +1,7 @@
 use crate::paths::Paths;
 use crate::ports::{self, Assignment};
 use crate::repo::is_tracked;
-use crate::repo::Repo;
+use crate::repo::{linked_worktree_id, Repo};
 use crate::run;
 use crate::slug::slugify;
 use anyhow::{bail, Context, Result};
@@ -638,9 +638,9 @@ pub fn worktree_rows(repo: &Repo, paths: &Paths) -> Result<Vec<(String, PathBuf,
     let mut rows = Vec::new();
     for entry in repo.worktrees()? {
         let root = canonical_or_self(&entry.path);
-        // A linked worktree has an administrative directory, and that directory
-        // name is the identity both `list` and `rm` resolve against. The primary
-        // checkout has none, so it is skipped.
+        // A linked worktree has an administrative directory, and the identity
+        // derived from its name is what both `list` and `rm` resolve against.
+        // The primary checkout has none, so it is skipped.
         let Some(id) = admin_id(&repo.common_dir, &root) else {
             continue;
         };
@@ -654,7 +654,8 @@ pub fn worktree_rows(repo: &Repo, paths: &Paths) -> Result<Vec<(String, PathBuf,
     Ok(rows)
 }
 
-/// Find the administrative directory name git assigned to a worktree path.
+/// Find the identity of the worktree at `worktree`, from the administrative
+/// directory git assigned it.
 fn admin_id(common_dir: &Path, worktree: &Path) -> Option<String> {
     let dir = common_dir.join("worktrees");
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -665,7 +666,10 @@ fn admin_id(common_dir: &Path, worktree: &Path) -> Option<String> {
         let pointer = raw.trim();
         let pointer_path = Path::new(pointer).parent().map(canonical_or_self);
         if pointer_path.as_deref() == Some(worktree) {
-            return entry.file_name().to_str().map(|name| name.to_string());
+            return entry
+                .file_name()
+                .to_str()
+                .map(|name| linked_worktree_id(name, &entry.path()));
         }
     }
     None

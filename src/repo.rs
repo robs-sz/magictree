@@ -18,6 +18,26 @@ pub struct WorktreeEntry {
     pub bare: bool,
 }
 
+/// Identity the primary checkout reserves.
+const PRIMARY_WORKTREE_ID: &str = "main";
+
+/// Identity for a linked worktree, from the administrative directory name git
+/// assigned it at `git_dir`.
+///
+/// Git names that directory after the checkout's basename and refuses a name
+/// only when another worktree already holds it, so a worktree checked out at
+/// `.../main` is named `main` too — the identity the primary checkout reserves.
+/// Sharing it would resolve both to one port block, one runtime directory and
+/// one compose project. Hashing the git directory disambiguates exactly that
+/// name and leaves every other one untouched.
+pub fn linked_worktree_id(name: &str, git_dir: &Path) -> String {
+    let name = name.trim();
+    if name == PRIMARY_WORKTREE_ID {
+        return format!("{name}-{}", short_hash(&git_dir.to_string_lossy()));
+    }
+    name.to_string()
+}
+
 impl Repo {
     pub fn open(from: &Path) -> Result<Self> {
         let worktree_root = PathBuf::from(run_git(from, &["rev-parse", "--show-toplevel"])?);
@@ -45,13 +65,15 @@ impl Repo {
     /// administrative directory name for linked worktrees.
     pub fn worktree_id(&self) -> String {
         if self.git_dir == self.common_dir {
-            return "main".to_string();
+            return PRIMARY_WORKTREE_ID.to_string();
         }
-        self.git_dir
+        let name = self
+            .git_dir
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "worktree".to_string())
+            .unwrap_or_else(|| "worktree".to_string());
+        linked_worktree_id(&name, &self.git_dir)
     }
 
     pub fn is_main_worktree(&self) -> bool {
