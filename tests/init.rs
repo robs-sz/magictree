@@ -221,11 +221,17 @@ health = { http = "/", timeout = 60 }
         vec![Applied::Updated {
             path: fixture.join("magictree.toml"),
             added: vec!["storybook".to_string()],
+            // The answers the update was planned from are recorded as well.
+            recorded: Some(Vec::new()),
         }],
         "the step the manifest already runs is not added a second time"
     );
 
     let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        manifest.contains("answers = { \"") && manifest.contains(".run\" = \"pnpm:dev\""),
+        "the answers are recorded:\n{manifest}"
+    );
     assert!(
         manifest.contains("prefer = 5173") && manifest.contains("# Kept as it was written"),
         "the update must not rewrite what was there:\n{manifest}"
@@ -240,8 +246,8 @@ health = { http = "/", timeout = 60 }
         "only the missing service is added:\n{manifest}"
     );
     assert!(
-        !manifest.contains(&derived),
-        "the plan's name for the app's own service must not appear:\n{manifest}"
+        !manifest.contains(&format!("id = \"{derived}\"")),
+        "the plan's name for the app's own service must not be declared:\n{manifest}"
     );
 
     // A second run has nothing to do, and leaves the file as it is.
@@ -253,6 +259,157 @@ health = { http = "/", timeout = 60 }
     let loaded = magictree::manifest::Loaded::load(fixture.path()).expect("load updated");
     loaded.validate().expect("the updated manifest is valid");
     assert_eq!(loaded.apps[0].manifest.services.len(), 2);
+}
+
+#[test]
+fn the_answers_are_recorded_in_the_manifest_at_the_root() {
+    let fixture = monorepo();
+    let report = extract(fixture.path()).expect("extract");
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+
+    // One file records them: the one `init` was told to work in. Every question
+    // is recorded, including the ones an app manifest answers, because the next
+    // run has to know whether it asked them at all.
+    let workspace = planned
+        .iter()
+        .find(|file| file.path.ends_with("magictree.toml") && !file.contents().contains("[app]"))
+        .expect("workspace manifest")
+        .contents();
+    assert!(
+        workspace.contains("# Recorded by `magictree init`"),
+        "{workspace}"
+    );
+    assert!(
+        workspace.contains("\"web.run\" = \"pnpm:dev\""),
+        "{workspace}"
+    );
+    assert!(
+        workspace.contains("\"compose.shared\" = [\"postgres\", \"redis\"]"),
+        "a multi-choice answer is a list:\n{workspace}"
+    );
+    // The line is a bare key, so it has to sit above the first table.
+    let answers = workspace.find("answers = {").expect("the answers line");
+    let table = workspace.find("[workspace]").expect("the workspace table");
+    assert!(
+        answers < table,
+        "a bare key above the first table:\n{workspace}"
+    );
+
+    let web = planned
+        .iter()
+        .find(|file| file.path.ends_with("apps/web/magictree.toml"))
+        .expect("web manifest")
+        .contents();
+    assert!(!web.contains("answers = {"), "{web}");
+
+    // The runtime never reads the line.
+    apply(&planned, false).expect("write");
+    let loaded = magictree::manifest::Loaded::load(fixture.path()).expect("load generated");
+    loaded.validate().expect("generated manifests are valid");
+}
+
+#[test]
+fn a_recorded_answer_is_replayed_and_a_stale_one_is_asked_again() {
+    let fixture = storybook_app(
+        r#"{"dev":"vite dev","storybook":"storybook dev -p 6006"}"#,
+        "app",
+    );
+    let report = extract(fixture.path()).expect("extract");
+    let id = report.apps[0].id.clone();
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"version = 1
+
+answers = {{ "{id}.run" = "pnpm:dev", "{id}.storybook" = "skip", "{id}.port_env" = "GONE", "leftover.question" = "x" }}
+
+[app]
+id = "{id}"
+"#
+        ),
+    );
+
+    let recorded = magictree::init::recorded(fixture.path(), &report).expect("recorded");
+
+    assert_eq!(
+        recorded
+            .answers
+            .get(&format!("{id}.run"))
+            .map(Answer::as_one),
+        Some(Some("pnpm:dev")),
+        "an answer the report still offers is replayed"
+    );
+    assert_eq!(
+        recorded
+            .answers
+            .get(&format!("{id}.storybook"))
+            .map(Answer::as_one),
+        Some(Some("skip")),
+        "a deliberate skip is remembered"
+    );
+    let dropped_ids: Vec<String> = recorded.dropped.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(
+        dropped_ids,
+        vec![format!("{id}.port_env"), "leftover.question".to_string()],
+        "a question that is gone, and one whose options no longer offer the answer"
+    );
+}
+
+#[test]
+fn an_update_replaces_the_recorded_answers_in_place() {
+    let fixture = storybook_app(
+        r#"{"dev":"vite dev","storybook":"storybook dev -p 6006"}"#,
+        "app",
+    );
+    let report = extract(fixture.path()).expect("extract");
+    let id = report.apps[0].id.clone();
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"version = 1
+
+# Recorded by `magictree init`; replayed so only new questions are asked.
+answers = {{ "{id}.run" = "skip" }}
+
+[app]
+id = "{id}"
+
+[[services]]
+id = "{id}"
+target = {{ kind = "pnpm", script = "dev" }}
+port = {{ env = "PORT" }}
+"#
+        ),
+    );
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+
+    let applied = apply(&planned, false).expect("update");
+    assert_eq!(
+        applied,
+        vec![Applied::Updated {
+            path: fixture.join("magictree.toml"),
+            added: vec!["storybook".to_string()],
+            // `run` differs from what the manifest was built with, which an
+            // additive update cannot apply to the service already written.
+            recorded: Some(vec![format!("{id}.run")]),
+        }]
+    );
+
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert_eq!(
+        manifest.matches("answers = {").count(),
+        1,
+        "the line is replaced, not added:\n{manifest}"
+    );
+    assert!(
+        manifest.contains(&format!("\"{id}.run\" = \"pnpm:dev\"")),
+        "{manifest}"
+    );
+    assert!(
+        !manifest.contains("\"skip\""),
+        "the replaced line leaves nothing behind:\n{manifest}"
+    );
+    assert_eq!(manifest.matches("[[services]]").count(), 2, "{manifest}");
 }
 
 #[test]

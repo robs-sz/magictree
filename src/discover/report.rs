@@ -265,7 +265,7 @@ pub struct AnswerSet {
     pub answers: std::collections::BTreeMap<String, Answer>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Answer {
     One(String),
@@ -274,6 +274,16 @@ pub enum Answer {
 }
 
 impl Answer {
+    /// How the answer reads in a message: the choice, the list, or the flag.
+    pub fn display(&self) -> String {
+        match self {
+            Answer::One(value) => value.clone(),
+            Answer::Many(values) if values.is_empty() => "none".to_string(),
+            Answer::Many(values) => values.join(", "),
+            Answer::Flag(value) => value.to_string(),
+        }
+    }
+
     pub fn as_one(&self) -> Option<&str> {
         match self {
             Answer::One(value) => Some(value),

@@ -87,15 +87,43 @@ fn resolve_option(options: &[String], token: &str) -> Option<String> {
         .cloned()
 }
 
-/// Ask every question on the terminal, in report order.
+/// Ask the questions that have no answer yet, in report order.
+///
+/// `recorded` holds what an earlier run answered, which is where the manifest
+/// records it. Those questions are not asked again unless the caller changes
+/// them, so a repository that gains one service does not re-interview the whole
+/// stack.
 pub fn prompt(
     report: &Report,
+    recorded: &BTreeMap<String, Answer>,
+    recorded_in: &str,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
 ) -> Result<AnswerSet> {
-    let mut answers: BTreeMap<String, Answer> = BTreeMap::new();
+    let mut answers: BTreeMap<String, Answer> = recorded.clone();
+    let mut questions: Vec<Unknown> = Vec::new();
 
-    for unknown in &report.unknowns {
+    if recorded.is_empty() {
+        questions.extend(report.unknowns.iter().cloned());
+    } else if change_recorded(recorded.len(), recorded_in, input, output)? {
+        // Everything is asked again, with what was recorded as the default.
+        questions.extend(
+            report
+                .unknowns
+                .iter()
+                .map(|unknown| unknown.with_recorded(recorded.get(&unknown.id))),
+        );
+    } else {
+        questions.extend(
+            report
+                .unknowns
+                .iter()
+                .filter(|unknown| !recorded.contains_key(&unknown.id))
+                .cloned(),
+        );
+    }
+
+    for unknown in &questions {
         let scope = match &unknown.scope {
             Scope::Workspace => "workspace".to_string(),
             Scope::App { app } => format!("app {app}"),
@@ -148,8 +176,36 @@ pub fn prompt(
     })
 }
 
+/// One question before answers that are already recorded are walked through
+/// again. Enter keeps them, which is the common case.
+fn change_recorded(
+    count: usize,
+    recorded_in: &str,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+) -> Result<bool> {
+    writeln!(
+        output,
+        "\n{count} question(s) are already answered in {recorded_in}."
+    )?;
+    write!(output, "Change any of them? [y/N] ")?;
+    output.flush()?;
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        bail!("input ended before every question was answered");
+    }
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// Run the wizard on the real terminal.
-pub fn run(report: &Report) -> Result<AnswerSet> {
+pub fn run(
+    report: &Report,
+    recorded: &BTreeMap<String, Answer>,
+    recorded_in: &str,
+) -> Result<AnswerSet> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "stdin is not a terminal, so the wizard cannot ask anything\n\
@@ -158,7 +214,13 @@ pub fn run(report: &Report) -> Result<AnswerSet> {
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    prompt(report, &mut stdin.lock(), &mut stdout.lock())
+    prompt(
+        report,
+        recorded,
+        recorded_in,
+        &mut stdin.lock(),
+        &mut stdout.lock(),
+    )
 }
 
 #[cfg(test)]
@@ -174,7 +236,7 @@ mod tests {
             id: id.to_string(),
             scope: Scope::Workspace,
             kind,
-            question: "q".to_string(),
+            question: format!("q {id}"),
             options: options.iter().map(|value| value.to_string()).collect(),
             evidence: Vec::new(),
             default: default.map(|value| value.to_string()),
@@ -270,25 +332,20 @@ mod tests {
 
     #[test]
     fn prompt_answers_every_question_in_order() {
-        let report = Report {
-            report_version: crate::discover::report::REPORT_VERSION,
-            report_hash: "sha256:x".to_string(),
-            repo: crate::discover::report::RepoFacts {
-                root: "/tmp".to_string(),
-                git_common_dir: "/tmp/.git".to_string(),
-                is_git_repo: true,
-                worktrees: Vec::new(),
-            },
-            apps: Vec::new(),
-            facts: Vec::new(),
-            unknowns: vec![
-                named("members", UnknownKind::MultiChoice, &["a", "b"], Some("a")),
-                named("run", UnknownKind::Choice, &["x", "y"], Some("y")),
-            ],
-        };
+        let report = test_report(vec![
+            named("members", UnknownKind::MultiChoice, &["a", "b"], Some("a")),
+            named("run", UnknownKind::Choice, &["x", "y"], Some("y")),
+        ]);
         let mut input = std::io::Cursor::new(b"b\n1\n".to_vec());
         let mut output = Vec::new();
-        let answers = prompt(&report, &mut input, &mut output).unwrap();
+        let answers = prompt(
+            &report,
+            &BTreeMap::new(),
+            "magictree.toml",
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
 
         assert_eq!(answers.report_hash, "sha256:x");
         assert!(matches!(
@@ -301,5 +358,99 @@ mod tests {
         ));
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("workspace"), "{rendered}");
+    }
+
+    #[test]
+    fn recorded_answers_are_kept_and_only_the_rest_is_asked() {
+        let report = test_report(vec![
+            named("run", UnknownKind::Choice, &["x", "y"], Some("y")),
+            named(
+                "storybook",
+                UnknownKind::Choice,
+                &["sb", "skip"],
+                Some("sb"),
+            ),
+        ]);
+        let mut recorded = BTreeMap::new();
+        recorded.insert("run".to_string(), Answer::One("x".to_string()));
+
+        // "n" keeps them, and only `storybook` is asked.
+        let mut input = std::io::Cursor::new(b"n\n2\n".to_vec());
+        let mut output = Vec::new();
+        let answers = prompt(
+            &report,
+            &recorded,
+            "/tmp/magictree.toml",
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            answers.answers.get("run"),
+            Some(Answer::One(value)) if value == "x"
+        ));
+        assert!(matches!(
+            answers.answers.get("storybook"),
+            Some(Answer::One(value)) if value == "skip"
+        ));
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(
+            rendered.contains("1 question(s) are already answered in /tmp/magictree.toml"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("q run"),
+            "the answered question is not asked again: {rendered}"
+        );
+        assert!(rendered.contains("q storybook"), "{rendered}");
+    }
+
+    #[test]
+    fn changing_recorded_answers_asks_them_again_with_what_was_chosen() {
+        let report = test_report(vec![named(
+            "run",
+            UnknownKind::Choice,
+            &["x", "y"],
+            Some("y"),
+        )]);
+        let mut recorded = BTreeMap::new();
+        recorded.insert("run".to_string(), Answer::One("x".to_string()));
+
+        // "y" asks everything, and the recorded answer is the default, so a bare
+        // enter keeps it and a different option changes it.
+        let mut input = std::io::Cursor::new(b"y\n\n".to_vec());
+        let mut output = Vec::new();
+        let answers = prompt(
+            &report,
+            &recorded,
+            "magictree.toml",
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            answers.answers.get("run"),
+            Some(Answer::One(value)) if value == "x"
+        ));
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("1. x (default)"), "{rendered}");
+    }
+
+    fn test_report(unknowns: Vec<Unknown>) -> Report {
+        Report {
+            report_version: crate::discover::report::REPORT_VERSION,
+            report_hash: "sha256:x".to_string(),
+            repo: crate::discover::report::RepoFacts {
+                root: "/tmp".to_string(),
+                git_common_dir: "/tmp/.git".to_string(),
+                is_git_repo: true,
+                worktrees: Vec::new(),
+            },
+            apps: Vec::new(),
+            facts: Vec::new(),
+            unknowns,
+        }
     }
 }

@@ -11,7 +11,7 @@ use crate::discover::extractors::{install_command, install_inputs, parse_port_ma
 use crate::discover::ports;
 use crate::discover::report::*;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -28,6 +28,12 @@ pub struct Generated {
     pub header: String,
     /// One entry per service, in the order they are written.
     pub services: Vec<ServiceBlock>,
+    /// The answers this manifest records, so a later run asks only about what
+    /// the repository has since added. Empty for every manifest but the one at
+    /// the repository root, which is where `init` was told to work.
+    pub answers: BTreeMap<String, Answer>,
+    /// True for the manifest that carries `answers`.
+    pub records_answers: bool,
 }
 
 impl Generated {
@@ -57,8 +63,16 @@ pub struct ServiceBlock {
 pub enum Applied {
     /// The file did not exist and was written whole.
     Created(PathBuf),
-    /// The file existed and was missing services, which were appended to it.
-    Updated { path: PathBuf, added: Vec<String> },
+    /// The file existed and changed.
+    Updated {
+        path: PathBuf,
+        added: Vec<String>,
+        /// `None` when the record was already up to date. `Some` holds the
+        /// answers that differed from the ones the manifest was built with: an
+        /// additive update cannot apply those to a service already written, so
+        /// the caller can say as much.
+        recorded: Option<Vec<String>>,
+    },
     /// The file existed and already declared every service the answers imply.
     Unchanged(PathBuf),
 }
@@ -105,6 +119,9 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
     let members = resolve_members(report, answers)?;
     let shared = answer_list(answers, "compose.shared")?;
     let exposed = answer_list(answers, "compose.expose")?;
+    // The answers are recorded in the manifest at the repository root, so the
+    // next run can ask only about what the repository has since gained.
+    let recorded = answers.answers.clone();
 
     let mut generated = Vec::new();
 
@@ -115,7 +132,8 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
     let workspace_layer = report.apps.len() > 1 || (manage_compose && !single_app_at_root);
 
     if workspace_layer {
-        let mut out = String::from("version = 1\n\n[workspace]\napps = [");
+        let mut out = manifest_head(Some(&recorded));
+        out.push_str("\n[workspace]\napps = [");
         for (index, dir) in members.iter().enumerate() {
             if index > 0 {
                 out.push_str(", ");
@@ -127,6 +145,8 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             path: repo_root.join("magictree.toml"),
             header: out,
             services: compose_services(&compose, report, &shared, &exposed)?,
+            answers: recorded.clone(),
+            records_answers: true,
         });
     }
 
@@ -141,7 +161,8 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             repo_root.join(&app.dir)
         };
         let shares_root_manifest = app.dir == ".";
-        let mut out = String::from("version = 1\n\n[app]\n");
+        let mut out = manifest_head(shares_root_manifest.then_some(&recorded));
+        out.push_str("\n[app]\n");
         let _ = writeln!(out, "id = \"{}\"", app.id);
         let mut services: Vec<ServiceBlock> = Vec::new();
 
@@ -253,6 +274,12 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             path: app_root.join("magictree.toml"),
             header: out,
             services,
+            answers: if shares_root_manifest {
+                recorded.clone()
+            } else {
+                BTreeMap::new()
+            },
+            records_answers: shares_root_manifest,
         });
     }
 
@@ -314,6 +341,175 @@ fn storybook_target(kind: &str, script: &str) -> Result<String> {
         "port = {{ env = \"{STORYBOOK_PORT}\", prefer = {STORYBOOK_PREFER} }}"
     );
     Ok(out)
+}
+
+/// The comment that explains the recorded answers, and the key they sit under.
+const ANSWERS_COMMENT: &str =
+    "# Recorded by `magictree init`; replayed so only new questions are asked.\n";
+const ANSWERS_KEY: &str = "answers";
+
+/// The start of a manifest: `version`, then the answers that produced it.
+///
+/// The answers have to sit here rather than with the services: a bare key
+/// belongs to the table above it, so anything after `[app]` or `[bootstrap]`
+/// would end up inside that table.
+fn manifest_head(answers: Option<&BTreeMap<String, Answer>>) -> String {
+    let mut out = String::from("version = 1\n");
+    if let Some(section) = answers.and_then(answers_section) {
+        out.push('\n');
+        out.push_str(&section);
+    }
+    out
+}
+
+/// The answers as one line of TOML, with the comment that explains it. `None`
+/// when there is nothing to record.
+///
+/// One line, because an existing manifest is updated by replacing it: the
+/// answers are `init`'s own record, and nothing else reads them.
+fn answers_section(answers: &BTreeMap<String, Answer>) -> Option<String> {
+    if answers.is_empty() {
+        return None;
+    }
+    let mut out = String::from(ANSWERS_COMMENT);
+    let _ = write!(out, "{ANSWERS_KEY} = {{");
+    for (index, (id, answer)) in answers.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, " \"{}\" = {}", escape_toml(id), answer_literal(answer));
+    }
+    out.push_str(" }\n");
+    Some(out)
+}
+
+/// One answer as a TOML value: a choice, a list, or a flag.
+fn answer_literal(answer: &Answer) -> String {
+    match answer {
+        Answer::One(value) => format!("\"{}\"", escape_toml(value)),
+        Answer::Many(values) => {
+            let quoted: Vec<String> = values
+                .iter()
+                .map(|value| format!("\"{}\"", escape_toml(value)))
+                .collect();
+            format!("[{}]", quoted.join(", "))
+        }
+        Answer::Flag(value) => value.to_string(),
+    }
+}
+
+/// The other direction: a recorded value back into an answer.
+fn answer_from_value(value: &toml::Value) -> Option<Answer> {
+    match value {
+        toml::Value::String(text) => Some(Answer::One(text.clone())),
+        toml::Value::Boolean(flag) => Some(Answer::Flag(*flag)),
+        toml::Value::Array(values) => {
+            let mut answers = Vec::new();
+            for value in values {
+                answers.push(value.as_str()?.to_string());
+            }
+            Some(Answer::Many(answers))
+        }
+        _ => None,
+    }
+}
+
+/// The answers a manifest records. Anything that is not the shape
+/// `answers_section` writes is left out, so a hand-written line cannot put words
+/// in `init`'s mouth.
+fn read_answers(contents: &str) -> Result<BTreeMap<String, Answer>> {
+    #[derive(serde::Deserialize)]
+    struct Recorded {
+        #[serde(default)]
+        answers: Option<toml::Value>,
+    }
+    let recorded: Recorded = toml::from_str(contents).context("reading the recorded answers")?;
+    Ok(recorded
+        .answers
+        .as_ref()
+        .and_then(|value| value.as_table())
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(id, value)| Some((id.clone(), answer_from_value(value)?)))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// What a manifest records, and the answers in it that this report no longer
+/// accepts — a script that was renamed, a service that is gone. The caller asks
+/// about those again rather than replaying them.
+#[derive(Debug, Default)]
+pub struct Recorded {
+    pub answers: BTreeMap<String, Answer>,
+    pub dropped: Vec<(String, Answer)>,
+}
+
+/// The answers a previous run recorded in the manifest at `root`.
+pub fn recorded(root: &Path, report: &Report) -> Result<Recorded> {
+    let path = root.join(crate::manifest::MANIFEST_FILE);
+    if !path.is_file() {
+        return Ok(Recorded::default());
+    }
+    let contents =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let mut recorded = Recorded::default();
+    for (id, answer) in read_answers(&contents)? {
+        let accepted = report
+            .unknowns
+            .iter()
+            .find(|unknown| unknown.id == id)
+            .is_some_and(|unknown| unknown.accepts(&answer));
+        if accepted {
+            recorded.answers.insert(id, answer);
+        } else {
+            recorded.dropped.push((id, answer));
+        }
+    }
+    Ok(recorded)
+}
+
+/// The manifest with its recorded answers replaced — or added before the first
+/// table, or dropped when there is nothing left to record.
+fn with_answers(contents: &str, answers: &BTreeMap<String, Answer>) -> String {
+    let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
+    let key = lines.iter().position(|line| is_answers_key(line));
+    let start = match key {
+        // The comment belongs to the line it explains, so both go.
+        Some(index) if index > 0 && is_answers_comment(&lines[index - 1]) => Some(index - 1),
+        other => other,
+    };
+    let section: Vec<String> = answers_section(answers)
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    match start {
+        Some(start) => {
+            let end = key.map_or(start + 1, |index| index + 1);
+            lines.splice(start..end, section);
+        }
+        // A bare key belongs to the table above it, so it goes above the first.
+        None if !section.is_empty() => {
+            let at = lines
+                .iter()
+                .position(|line| line.starts_with('['))
+                .unwrap_or(lines.len());
+            lines.splice(at..at, section);
+        }
+        None => {}
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn is_answers_key(line: &str) -> bool {
+    line.strip_prefix(ANSWERS_KEY)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+fn is_answers_comment(line: &str) -> bool {
+    line.trim_end() == ANSWERS_COMMENT.trim_end()
 }
 
 /// Names that conventionally mark a one-shot initialiser rather than a server.
@@ -501,6 +697,27 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
             .with_context(|| format!("reading {}", file.path.display()))?;
         let declared = crate::manifest::parse_str(&existing)
             .with_context(|| format!("reading the services of {}", file.path.display()))?;
+        // The answers are init's own record, so they are brought up to date even
+        // when the manifest needs no new service: a question answered differently
+        // is still worth remembering for the next run.
+        let record = file.records_answers;
+        let before = if record {
+            read_answers(&existing)
+                .with_context(|| format!("reading the answers of {}", file.path.display()))?
+        } else {
+            BTreeMap::new()
+        };
+        let recorded = (record && before != file.answers).then(|| {
+            file.answers
+                .iter()
+                .filter(|(id, answer)| {
+                    before
+                        .get(*id)
+                        .is_some_and(|previous| *previous != **answer)
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<String>>()
+        });
         // A manifest may declare a step under a name of its own — the app's
         // service renamed, or its app id chosen over the derived one. The step
         // is what must not run twice, so a service the manifest already runs is
@@ -518,22 +735,29 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
                     .is_some_and(|step| declared_steps.contains(step))
             })
             .collect();
-        if missing.is_empty() {
+        if missing.is_empty() && recorded.is_none() {
             decided.push((Applied::Unchanged(file.path.clone()), existing));
             continue;
         }
-        let mut contents = existing;
-        if !contents.ends_with('\n') {
-            contents.push('\n');
-        }
-        for service in &missing {
-            contents.push('\n');
-            contents.push_str(&service.text);
+        let mut contents = if recorded.is_some() {
+            with_answers(&existing, &file.answers)
+        } else {
+            existing
+        };
+        if !missing.is_empty() {
+            if !contents.ends_with('\n') {
+                contents.push('\n');
+            }
+            for service in &missing {
+                contents.push('\n');
+                contents.push_str(&service.text);
+            }
         }
         decided.push((
             Applied::Updated {
                 path: file.path.clone(),
                 added: missing.iter().map(|service| service.id.clone()).collect(),
+                recorded,
             },
             contents,
         ));
@@ -807,5 +1031,35 @@ impl Unknown {
                 .collect(),
             None => self.options.clone(),
         }
+    }
+
+    /// True when this answer is one the question still offers. A recorded answer
+    /// that no longer fits is asked again rather than replayed.
+    pub fn accepts(&self, answer: &Answer) -> bool {
+        match self.kind {
+            UnknownKind::Choice => answer
+                .as_one()
+                .is_some_and(|value| self.options.iter().any(|option| option == value)),
+            UnknownKind::MultiChoice => answer
+                .as_many()
+                .iter()
+                .all(|value| self.options.iter().any(|option| option == value)),
+            UnknownKind::Bool => answer.as_flag().is_some(),
+            UnknownKind::Text => answer.as_one().is_some(),
+        }
+    }
+
+    /// The same question with a recorded answer as its default, so re-asking it
+    /// shows what was chosen last time and keeping it is one keystroke.
+    pub fn with_recorded(&self, recorded: Option<&Answer>) -> Unknown {
+        let mut question = self.clone();
+        if let Some(answer) = recorded {
+            question.default = Some(match answer {
+                Answer::One(value) => value.clone(),
+                Answer::Many(values) => values.join(","),
+                Answer::Flag(value) => value.to_string(),
+            });
+        }
+        question
     }
 }

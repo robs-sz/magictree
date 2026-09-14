@@ -102,6 +102,9 @@ pub struct InitArgs {
     /// Without it, an existing manifest only gains the services it lacks.
     #[arg(long)]
     pub force: bool,
+    /// Ask every question again, ignoring the answers the manifest records.
+    #[arg(long)]
+    pub reanswer: bool,
     /// Print the manifests without writing them.
     #[arg(long)]
     pub print: bool,
@@ -453,10 +456,37 @@ fn describe_fact(data: &discover::FactData) -> String {
 fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
     let root = resolve_cwd(args.cwd)?;
     let report = discover::extract(&root)?;
+    // What an earlier run recorded in the manifest, so the questions it already
+    // answered are not asked again. An explicit answers file is used as given.
+    let manifest = root.join(manifest::MANIFEST_FILE);
+    let recorded = if args.reanswer || args.answers.is_some() {
+        init::Recorded::default()
+    } else {
+        init::recorded(&root, &report)?
+    };
+    for (id, answer) in &recorded.dropped {
+        eprintln!(
+            "warning: asking again about '{id}': the recorded answer '{}' is no longer offered",
+            answer.display()
+        );
+    }
     let answers = match &args.answers {
         Some(path) => discover::AnswerSet::read_json(path)?,
-        None if args.accept_defaults => init::default_answers(&report),
-        None => init::wizard::run(&report)?,
+        None if args.accept_defaults => {
+            let mut answers = init::default_answers(&report);
+            for (id, answer) in &recorded.answers {
+                answers.answers.insert(id.clone(), answer.clone());
+            }
+            if !recorded.answers.is_empty() {
+                println!(
+                    "keeping {} answer(s) recorded in {}",
+                    recorded.answers.len(),
+                    manifest.display()
+                );
+            }
+            answers
+        }
+        None => init::wizard::run(&report, &recorded.answers, &manifest.display().to_string())?,
     };
     if let Some(path) = &args.save_answers {
         answers.write(path)?;
@@ -481,11 +511,28 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
     for applied in init::apply(&planned, args.force)? {
         match applied {
             init::Applied::Created(path) => println!("wrote {}", path.display()),
-            init::Applied::Updated { path, added } => println!(
-                "updated {}: added service '{}'",
-                path.display(),
-                added.join("', '")
-            ),
+            init::Applied::Updated {
+                path,
+                added,
+                recorded,
+            } => {
+                let mut changes: Vec<String> = Vec::new();
+                if !added.is_empty() {
+                    changes.push(format!("added service '{}'", added.join("', '")));
+                }
+                if recorded.is_some() {
+                    changes.push("recorded the answers".to_string());
+                }
+                println!("updated {}: {}", path.display(), changes.join(", "));
+                if let Some(changed) = recorded.filter(|changed| !changed.is_empty()) {
+                    eprintln!(
+                        "warning: the answer for '{}' changed; the services already in {} keep what they declare\n\
+                         re-run with `magictree init --force` to rewrite them",
+                        changed.join("', '"),
+                        path.display()
+                    );
+                }
+            }
             init::Applied::Unchanged(path) => {
                 println!(
                     "unchanged {}: every service is already declared",

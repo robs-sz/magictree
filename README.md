@@ -22,12 +22,23 @@ stack that silently does not exist. Run `discover` and `init` in the primary che
 one `git worktree list` prints first, and the one `magictree list` never shows.
 
 Onboarding does not end at the first run. Run `discover` and `init` again after the
-repository gains something — a Storybook, a new compose service — and `init` appends the
-service blocks the manifest is missing, leaving every other line, comment and value as it
-was. A step the manifest already runs is not added a second time, whatever the service is
-called there, and `init` says which services it added and which manifests it left alone.
-`--force` regenerates the whole file from discovery instead, which is the only thing that
-discards local edits.
+repository gains something — a Storybook, a new compose service — and `init` asks only about
+what it has not been told before: the answers it was given are recorded in the manifest at
+the repository root, as one `answers` line, and replayed on the next run. A question answered
+`skip` stays skipped even after the repository gains what it declined.
+
+```toml
+# Recorded by `magictree init`; replayed so only new questions are asked.
+answers = { "web.run" = "pnpm:dev", "web.storybook" = "skip" }
+```
+
+`init` then appends the service blocks the manifest is missing and leaves every other line,
+comment and value as it was. A step the manifest already runs is not added a second time,
+whatever the service is called there, and `init` says which services it added, which answers
+it recorded and which manifests it left alone. An answer that changed cannot reach a service
+already written — an update never rewrites one — so `init` says so and points at `--force`,
+which regenerates the file from the recorded answers. `--reanswer` asks every question again,
+ignoring what was recorded.
 
 ```sh
 magictree new feat/billing          # git worktree add beside the primary checkout, then up
@@ -120,6 +131,7 @@ reads and drives the components.
 |---|---|---|
 | `version` | yes | Manifest format; only `1` is accepted. |
 | `[app] id` | no | App id, which qualifies its services in a monorepo. Defaults to the directory name. |
+| `answers` | root only | What `init` was told, replayed so a later run asks only about what is new. Written by `init`; the runtime never reads it. |
 | `[workspace] apps` | root only | Relative directories of the apps this repository contains. |
 | `[env]` | no | `KEY = "value"`, layered under the values magictree computes. |
 | `[bootstrap]` | no | Setup that runs before services start. |

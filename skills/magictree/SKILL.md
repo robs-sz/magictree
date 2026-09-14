@@ -42,6 +42,7 @@ magictree discover --default-answers       # the answer set the report implies
 magictree init                             # interactive: asks each question
 magictree init --accept-defaults           # non-interactive: take every default
 magictree init --answers answers.json      # replay a reviewed answer set
+magictree init --reanswer                  # ask again, ignoring the recorded answers
 magictree init --print                     # show the manifests, write nothing
 magictree init --save-answers answers.json # record what was answered
 
@@ -58,9 +59,15 @@ An existing manifest is **added to, not replaced**: `init` appends the service
 blocks the manifest is missing — a Storybook, a compose service the answers now
 manage — and prints `added service 'storybook'`. Every other line, comment and
 value stays as written, and a step the manifest already runs is never added a
-second time under the plan's name for it. `init --force` is the only thing that
-regenerates a file from discovery, discarding local edits, so reach for it only
-when the manifest is one `init` wrote and you want it rewritten.
+second time under the plan's name for it.
+
+`init` records what it was told in the manifest at the repository root, as one
+`answers` line, and replays it: the next run asks only about what the repository
+has since gained, and a question answered `skip` stays skipped. So do not edit
+that line to change an answer — run `magictree init --reanswer`, which asks every
+question again, and keep the manifest as the place where choices live. `init
+--force` regenerates the file from the recorded answers, which is how an answer
+that changed reaches a service that was already written.
 
 **Do not hand-write a manifest when the repository can be discovered.** Run
 `discover`, answer the questions, and let `init` write it. If you do write one by

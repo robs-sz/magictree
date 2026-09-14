@@ -627,6 +627,84 @@ port = { env = "PORT", prefer = 5173 }
 }
 
 #[test]
+fn init_records_its_answers_and_asks_again_only_from_them() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        r#"{"name":"solo","packageManager":"pnpm@9","scripts":{"dev":"sleep 300"}}"#,
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.git_repo();
+    let state = fixture.state_dir();
+    let id = fixture
+        .path()
+        .file_name()
+        .expect("fixture name")
+        .to_string_lossy()
+        .to_string();
+
+    let first = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(first.ok(), "{}", first.combined());
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        manifest.contains(&format!("\"{id}.run\" = \"pnpm:dev\"")),
+        "{manifest}"
+    );
+
+    // Nothing has changed, so the second run records nothing new and rewrites
+    // nothing.
+    let second = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(second.ok(), "{}", second.combined());
+    assert!(
+        second.stdout.contains("keeping 1 answer(s) recorded in"),
+        "{}",
+        second.combined()
+    );
+    assert!(second.stdout.contains("unchanged"), "{}", second.combined());
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("magictree.toml")).expect("read"),
+        manifest,
+        "an unchanged run leaves the file alone"
+    );
+
+    // A question answered `skip` is remembered: the service the repository
+    // gained afterwards is offered, not added.
+    fixture.write(
+        "package.json",
+        r#"{"name":"solo","packageManager":"pnpm@9","scripts":{"dev":"sleep 300","storybook":"storybook dev -p 6006"},"devDependencies":{"@storybook/react-vite":"8.6.14"}}"#,
+    );
+    fixture.write(".storybook/main.ts", "export default {};\n");
+    fixture.write(
+        "magictree.toml",
+        &manifest.replace(
+            &format!("\"{id}.run\" = \"pnpm:dev\""),
+            &format!("\"{id}.run\" = \"pnpm:dev\", \"{id}.storybook\" = \"skip\""),
+        ),
+    );
+    let third = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(third.ok(), "{}", third.combined());
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        !manifest.contains("id = \"storybook\""),
+        "the recorded skip is honoured:\n{manifest}"
+    );
+
+    // Ignoring the record asks about it again, so this time it is added.
+    let reanswered = run(
+        &["init", "--accept-defaults", "--reanswer"],
+        fixture.path(),
+        &state,
+    );
+    assert!(reanswered.ok(), "{}", reanswered.combined());
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(manifest.contains("id = \"storybook\""), "{manifest}");
+    assert!(
+        manifest.contains(&format!("\"{id}.storybook\" = \"pnpm:storybook\"")),
+        "the record is brought up to date:\n{manifest}"
+    );
+}
+
+#[test]
 fn discover_init_doctor_round_trip() {
     let fixture = Fixture::new();
     fixture.write(
