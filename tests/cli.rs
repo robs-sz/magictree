@@ -220,6 +220,27 @@ fn a_repository_without_a_manifest_says_so() {
 }
 
 #[test]
+fn gc_outside_a_repository_names_the_machine_wide_sweep() {
+    // No checkout means no scope to reconcile, and sweeping the whole state dir
+    // instead would be a scope the user never asked for. The failure has to
+    // carry the way to ask for it, since that is the only way to reclaim a
+    // repository that is itself gone.
+    let fixture = Fixture::new();
+    let state = fixture.state_dir();
+
+    let scoped = run(&["gc"], fixture.path(), &state);
+    assert!(!scoped.ok(), "{}", scoped.combined());
+    assert!(
+        scoped.stderr.contains("--all"),
+        "the failure must name the sweep that needs no repository: {}",
+        scoped.stderr
+    );
+
+    let swept = run(&["gc", "--all"], fixture.path(), &state);
+    assert!(swept.ok(), "{}", swept.combined());
+}
+
+#[test]
 fn health_probe_gates_up_until_the_service_answers() {
     if !have("python3", &["-c", "pass"]) {
         eprintln!("skipping: python3 is unavailable for a listener fixture");

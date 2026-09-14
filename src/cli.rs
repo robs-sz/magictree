@@ -727,7 +727,15 @@ fn cmd_gc(args: GcArgs, dry_run: bool) -> Result<()> {
     if args.all {
         return worktrees::gc_all(&paths, timeout, apply);
     }
-    let repo = Repo::open(&resolve_cwd(args.cwd)?)?;
+    let repo = match Repo::open_optional(&resolve_cwd(args.cwd)?)? {
+        Some(repo) => repo,
+        // Sweeping the whole state dir from here would be a scope the user
+        // never asked for, so name the flag that asks for it.
+        None => bail!(
+            "no git repository here\n\n`magictree gc --all` sweeps every repository the state dir \
+             knows about, including one whose checkout is gone"
+        ),
+    };
     worktrees::gc(&paths, &repo, timeout, apply)?;
     if args.prune {
         worktrees::prune(&repo, !apply)?;

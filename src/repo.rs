@@ -41,6 +41,25 @@ pub fn linked_worktree_id(name: &str, git_dir: &Path) -> String {
 impl Repo {
     pub fn open(from: &Path) -> Result<Self> {
         let worktree_root = PathBuf::from(run_git(from, &["rev-parse", "--show-toplevel"])?);
+        Self::from_root(from, worktree_root)
+    }
+
+    /// The repository `from` belongs to, or `None` where git resolves no work
+    /// tree from it: no repository at all, or a bare one, which has no checkout
+    /// a stack could run in.
+    ///
+    /// A command that cannot scope its work from a checkout, `gc` above all,
+    /// needs to tell a missing repository from a broken one and choose a scope
+    /// deliberately. A git that cannot be run at all is still an error.
+    pub fn open_optional(from: &Path) -> Result<Option<Self>> {
+        let Some(worktree_root) = git_toplevel(from)? else {
+            return Ok(None);
+        };
+        Self::from_root(from, worktree_root).map(Some)
+    }
+
+    /// Finish resolution from a work tree root git has already reported.
+    fn from_root(from: &Path, worktree_root: PathBuf) -> Result<Self> {
         let common_dir = PathBuf::from(run_git(
             from,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -145,6 +164,24 @@ pub fn is_tracked(dir: &Path, path: &Path) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// The work tree root git resolves from `cwd`, or `None` when git resolves
+/// none: the difference between a path outside every repository and a git that
+/// failed to answer at all.
+fn git_toplevel(cwd: &Path) -> Result<Option<PathBuf>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .with_context(|| format!("running git in {}", cwd.display()))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    )))
 }
 
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
