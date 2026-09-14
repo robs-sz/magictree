@@ -547,3 +547,135 @@ fn says_nothing_when_the_run_step_reads_the_variable() {
 
     assert!(warnings(&report, &answers).is_empty());
 }
+
+/// An app that has Storybook beside its own dev server.
+fn storybook_app(scripts: &str, name: &str) -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        &format!(
+            r#"{{"name":"{name}","packageManager":"pnpm@9","scripts":{scripts},"devDependencies":{{"@storybook/react-vite":"8.6.14"}}}}"#
+        ),
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.write(".storybook/main.ts", "export default { stories: [] };\n");
+    fixture.git_repo();
+    fixture
+}
+
+#[test]
+fn the_storybook_answer_adds_a_service_on_its_own_port() {
+    let fixture = storybook_app(
+        r#"{"dev":"vite dev","storybook":"storybook dev -p 6006"}"#,
+        "app",
+    );
+    let report = extract(fixture.path()).expect("extract");
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+    let manifest = &planned[0].contents;
+    let id = report.apps[0].id.clone();
+
+    let storybook = manifest
+        .split("[[services]]")
+        .skip(1)
+        .find(|block| block.contains("id = \"storybook\""))
+        .expect("a service of its own");
+    // Storybook reads its port from a flag and from no variable at all, so the
+    // allocated port is passed on the command line, after the script's own.
+    assert!(
+        storybook.contains("args = [\"-p\", \"${STORYBOOK_PORT:-6006}\", \"--no-open\"]"),
+        "{storybook}"
+    );
+    assert!(
+        storybook.contains("port = { env = \"STORYBOOK_PORT\", prefer = 6006 }"),
+        "{storybook}"
+    );
+    assert!(storybook.contains("health = { http = \"/\""), "{storybook}");
+
+    // The app's own service is untouched: it keeps the variable it was answered.
+    let app = manifest
+        .split("[[services]]")
+        .skip(1)
+        .find(|block| block.contains(&format!("id = \"{id}\"")))
+        .expect("the app service");
+    assert!(app.contains("port = { env = \"PORT\" }"), "{app}");
+
+    apply(&planned, false).expect("write");
+    let loaded = magictree::manifest::Loaded::load(fixture.path()).expect("load generated");
+    loaded.validate().expect("generated manifests are valid");
+    assert_eq!(loaded.apps[0].manifest.services.len(), 2);
+}
+
+#[test]
+fn an_app_started_by_storybook_itself_is_not_started_twice() {
+    // A component library whose only server is Storybook: the run answer points
+    // at the same script, so it is one service, with Storybook's port handling.
+    let fixture = storybook_app(r#"{"dev":"storybook dev -p 6006"}"#, "app");
+    let report = extract(fixture.path()).expect("extract");
+    let answers = answers_for(&report);
+    let id = report.apps[0].id.clone();
+    assert_eq!(
+        answers
+            .answers
+            .get(&format!("{id}.run"))
+            .and_then(Answer::as_one),
+        Some("pnpm:dev"),
+    );
+    assert_eq!(
+        answers
+            .answers
+            .get(&format!("{id}.storybook"))
+            .and_then(Answer::as_one),
+        Some("pnpm:dev"),
+        "the same step answers both questions"
+    );
+
+    let planned = plan(&report, &answers, fixture.path()).expect("plan");
+    let manifest = &planned[0].contents;
+    assert_eq!(
+        manifest.matches("[[services]]").count(),
+        1,
+        "the same server must not be declared twice:\n{manifest}"
+    );
+    assert!(
+        manifest.contains("args = [\"-p\", \"${STORYBOOK_PORT:-6006}\", \"--no-open\"]"),
+        "{manifest}"
+    );
+    assert!(
+        warnings(&report, &answers).is_empty(),
+        "the manifest hands Storybook its port, so nothing is left to warn about"
+    );
+}
+
+#[test]
+fn an_app_named_storybook_keeps_its_own_service_id() {
+    let fixture = Fixture::new();
+    fixture.write("pnpm-workspace.yaml", "packages:\n  - \"apps/*\"\n");
+    fixture.write(
+        "apps/storybook/package.json",
+        r#"{"name":"stories","packageManager":"pnpm@9","scripts":{"dev":"vite dev","storybook":"storybook dev -p 6006"},"devDependencies":{"@storybook/react-vite":"8.6.14"}}"#,
+    );
+    fixture.write("apps/storybook/pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.write(
+        "apps/storybook/.storybook/main.ts",
+        "export default { stories: [] };\n",
+    );
+    fixture.git_repo();
+    let report = extract(fixture.path()).expect("extract");
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+    let manifest = planned
+        .iter()
+        .find(|file| file.path.ends_with("apps/storybook/magictree.toml"))
+        .expect("the app manifest")
+        .contents
+        .clone();
+
+    assert!(manifest.contains("id = \"storybook\""), "{manifest}");
+    assert!(
+        manifest.contains("id = \"storybook-dev\""),
+        "the app already owns the id 'storybook':\n{manifest}"
+    );
+    apply(&planned, false).expect("write");
+    let loaded =
+        magictree::manifest::Loaded::load(&fixture.join("apps/storybook")).expect("load generated");
+    loaded.validate().expect("generated manifests are valid");
+}

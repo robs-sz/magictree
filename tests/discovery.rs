@@ -476,3 +476,84 @@ fn a_script_that_reads_a_variable_pins_nothing() {
         "an expansion is not a literal"
     );
 }
+
+#[test]
+fn finds_storybook_and_offers_the_script_that_serves_it() {
+    let fixture = monorepo();
+    fixture.write(
+        "apps/web/package.json",
+        r#"{"name":"web","packageManager":"pnpm@9","scripts":{"dev":"vite dev","storybook":"storybook dev -p 6006","build-storybook":"storybook build"},"devDependencies":{"@storybook/react-vite":"8.6.14","@storybook/addon-mcp":"0.1.0"}}"#,
+    );
+    fixture.write(
+        "apps/web/.storybook/main.ts",
+        "export default { stories: [] };\n",
+    );
+    let report = extract(fixture.path()).expect("extract");
+
+    let fact = report
+        .facts
+        .iter()
+        .find(|fact| fact.kind == FactKind::Storybook && fact.app.as_deref() == Some("web"))
+        .expect("a storybook fact");
+    assert_eq!(fact.source, "apps/web/.storybook/main.ts");
+    let FactData::Storybook {
+        config_dir,
+        dev_scripts,
+        has_mcp,
+    } = &fact.data
+    else {
+        panic!("expected storybook data");
+    };
+    assert_eq!(config_dir.as_deref(), Some(".storybook"));
+    assert_eq!(dev_scripts, &vec!["pnpm:storybook".to_string()]);
+    assert!(has_mcp, "the addon that answers MCP is installed");
+
+    // Storybook runs beside the app, so the app keeps its own run question.
+    let question = report
+        .unknowns
+        .iter()
+        .find(|unknown| unknown.id == "web.storybook")
+        .expect("a storybook question");
+    assert_eq!(question.kind, UnknownKind::Choice);
+    assert_eq!(question.options, vec!["skip", "pnpm:storybook"]);
+    assert_eq!(question.default.as_deref(), Some("pnpm:storybook"));
+    assert!(report
+        .unknowns
+        .iter()
+        .any(|unknown| unknown.id == "web.run"));
+    assert!(
+        !report
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.id == "api.storybook"),
+        "an app without Storybook is not asked about it"
+    );
+}
+
+#[test]
+fn asks_nothing_about_storybook_without_the_tool() {
+    // A script name alone is not evidence: the app has to declare Storybook or
+    // read its configuration before it is offered a service for it.
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        r#"{"name":"app","scripts":{"storybook":"./scripts/not-storybook.sh"}}"#,
+    );
+    fixture.git_repo();
+    let report = extract(fixture.path()).expect("extract");
+
+    assert!(
+        !report
+            .facts
+            .iter()
+            .any(|fact| fact.kind == FactKind::Storybook),
+        "nothing indicates Storybook here"
+    );
+    assert!(
+        !report
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.id.ends_with(".storybook")),
+        "the app must not be asked about a tool it does not use"
+    );
+}

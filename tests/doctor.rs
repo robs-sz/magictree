@@ -351,3 +351,53 @@ port = { env = "APP_PORT" }
 
     assert_eq!(drift_summaries(&fixture), Vec::<String>::new());
 }
+
+#[test]
+fn a_service_that_hands_its_port_to_the_step_is_clean() {
+    // What `init` writes for Storybook: the allocated port is appended after the
+    // script's own arguments, so the literal the script pins never binds.
+    let fixture = pinned_repo();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+[app]
+id = "app"
+
+[[services]]
+id = "app"
+target = { kind = "pnpm", script = "dev", args = ["-p", "${APP_PORT:-3005}"] }
+port = { env = "APP_PORT" }
+"#,
+    );
+
+    assert_eq!(drift_summaries(&fixture), Vec::<String>::new());
+}
+
+#[test]
+fn an_npm_service_that_does_not_separate_its_arguments_is_still_drift() {
+    // `npm run` consumes anything that is not behind `--`, so those arguments
+    // never reach the script and the literal it pins is still the one that binds.
+    let fixture = pinned_repo();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+[app]
+id = "app"
+
+[[services]]
+id = "app"
+target = { kind = "npm", script = "dev", args = ["-p", "${APP_PORT:-3005}"] }
+port = { env = "APP_PORT" }
+"#,
+    );
+
+    let summaries = drift_summaries(&fixture);
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.contains("pins port 3005")),
+        "the port the script pins is still the one that binds: {summaries:?}"
+    );
+}

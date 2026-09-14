@@ -214,6 +214,15 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
         for service in &app.manifest.services {
             let advice = port_advice(loaded, &app.id, service);
             for pinned in pinned_ports(service, &facts) {
+                if let Some(step) = &pinned.step {
+                    reported.insert(step.clone());
+                    // The service's own command line hands the allocated port to
+                    // the step, so the literal the step pins never binds: the
+                    // value appended after it is the one that takes effect.
+                    if command_hands_over(service, &advice.variable) {
+                        continue;
+                    }
+                }
                 let rewrite = ports::rewrite(&pinned.command, &advice.variable)
                     .unwrap_or_else(|| pinned.command.clone());
                 let mut list: Vec<u16> = pinned.literals.iter().map(|item| item.port).collect();
@@ -245,9 +254,6 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
                     ),
                     Some(suggestion),
                 ));
-                if let Some(step) = &pinned.step {
-                    reported.insert(step.clone());
-                }
             }
         }
     }
@@ -436,6 +442,25 @@ fn pinned_ports(service: &Service, facts: &[&Fact]) -> Vec<PinnedPort> {
         }
     }
     out
+}
+
+/// True when the service's own command line passes `variable` on to the step it
+/// runs, as `args = ["-p", "${APP_PORT}"]` does for one that pins `-p`.
+///
+/// The appended arguments land after the step's own, so the last flag wins and
+/// the literal it pins never binds. `npm run` stops parsing at `--`, so an npm
+/// command only counts with the separator; pnpm, yarn and bun forward
+/// everything after the script name themselves.
+fn command_hands_over(service: &Service, variable: &str) -> bool {
+    let command = match (&service.target, &service.command) {
+        (Some(target), _) => target.command(),
+        (None, Some(command)) => command.clone(),
+        _ => return false,
+    };
+    let Some(at) = command.find(&format!("${{{variable}")) else {
+        return false;
+    };
+    !command.starts_with("npm ") || command[..at].contains(" -- ")
 }
 
 /// Where a service's port should come from, and whether the manifest says so.

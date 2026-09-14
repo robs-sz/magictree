@@ -187,6 +187,9 @@ Rules that matter:
   chose, and `doctor` reports the service's own command as drift with the rewrite
   (`next dev -p ${APP_PORT:-3005}`). Never paper over one by hardcoding the port in the
   manifest instead.
+- Storybook is the exception, because it reads no port variable at all: `init` starts it with
+  `args = ["-p", "${STORYBOOK_PORT:-6006}", "--no-open"]`, the appended flag beating whatever
+  the script pins. Keep that shape on a `storybook` service written by hand.
 - Host services need either `command` or `target`. Compose services need neither.
 - A compose service must give `port.target` (the container-side port) for every port it
   exposes. `expose = "none"` publishes nothing.

@@ -110,11 +110,12 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             out.push_str(&section);
         }
 
-        let run_answer = answers
+        let run_spec = answers
             .answers
             .get(&format!("{}.run", app.id))
-            .and_then(|answer| answer.as_one());
-        if let Some(spec) = run_answer.filter(|spec| *spec != "skip") {
+            .and_then(|answer| answer.as_one())
+            .filter(|spec| *spec != "skip");
+        if let Some(spec) = run_spec {
             let (kind, rest) = spec
                 .split_once(':')
                 .with_context(|| format!("malformed run answer '{spec}'"))?;
@@ -135,14 +136,47 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             }
             out.push_str("\n[[services]]\n");
             let _ = writeln!(out, "id = \"{}\"", app.id);
-            out.push_str(&target_line(kind, rest, spec)?);
-            let port_variable = answers
-                .answers
-                .get(&format!("{}.port_env", app.id))
-                .and_then(|answer| answer.as_one())
-                .filter(|name| !name.is_empty() && *name != "none")
-                .unwrap_or("PORT");
-            let _ = writeln!(out, "port = {{ env = \"{port_variable}\" }}");
+            if serves_storybook(report, &app.id, spec) {
+                // The app's own server is Storybook: it gets the same port
+                // handling as the dedicated service below, because Storybook
+                // reads no environment variable for it.
+                out.push_str(&storybook_target(kind, rest)?);
+            } else {
+                out.push_str(&target_line(kind, rest, spec)?);
+                let port_variable = answers
+                    .answers
+                    .get(&format!("{}.port_env", app.id))
+                    .and_then(|answer| answer.as_one())
+                    .filter(|name| !name.is_empty() && *name != "none")
+                    .unwrap_or("PORT");
+                let _ = writeln!(out, "port = {{ env = \"{port_variable}\" }}");
+            }
+            out.push_str("health = { http = \"/\", timeout = 120 }\n");
+        }
+
+        // Storybook runs beside the app rather than instead of it, so it is a
+        // service of its own on the worktree's own port.
+        let storybook_answer = answers
+            .answers
+            .get(&format!("{}.storybook", app.id))
+            .and_then(|answer| answer.as_one())
+            .filter(|spec| *spec != "skip");
+        if let Some(spec) = storybook_answer.filter(|spec| Some(*spec) != run_spec) {
+            let (kind, rest) = spec
+                .split_once(':')
+                .with_context(|| format!("malformed storybook answer '{spec}'"))?;
+            // An app that is itself named `storybook` already owns that id.
+            let id = if app.id == "storybook" {
+                "storybook-dev"
+            } else {
+                "storybook"
+            };
+            if let Some(comment) = storybook_mcp_comment(report, &app.id) {
+                out.push_str(comment);
+            }
+            out.push_str("\n[[services]]\n");
+            let _ = writeln!(out, "id = \"{id}\"");
+            out.push_str(&storybook_target(kind, rest)?);
             out.push_str("health = { http = \"/\", timeout = 120 }\n");
         }
 
@@ -160,6 +194,62 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
 
     generated.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(generated)
+}
+
+/// Storybook's port variable and the port the dev server listens on when nothing
+/// overrides it. Storybook reads no environment variable of its own: the
+/// variable carries the allocated port onto the command line.
+pub(crate) const STORYBOOK_PORT: &str = "STORYBOOK_PORT";
+const STORYBOOK_PREFER: u16 = 6006;
+
+/// True when this run answer starts Storybook itself, so the service that runs
+/// it needs Storybook's port handling rather than a variable nothing reads.
+fn serves_storybook(report: &Report, app: &str, spec: &str) -> bool {
+    report.storybook_scripts(app).contains(&spec)
+}
+
+/// A note naming the MCP endpoint the dev server answers on, for the agent that
+/// has to find it. Only written when the addon that serves it is installed.
+fn storybook_mcp_comment(report: &Report, app: &str) -> Option<&'static str> {
+    if !report.storybook_has_mcp(app) {
+        return None;
+    }
+    Some("\n# @storybook/addon-mcp answers MCP at /mcp on this service\n")
+}
+
+/// The target and port for a service that serves Storybook.
+///
+/// Storybook takes its port from `-p`/`--port` and from nothing else, so the
+/// allocated port is passed on the command line. Appending it after the script's
+/// own arguments makes it win over whatever the repository's script pins, which
+/// is what keeps a second worktree off the first one's port. `--no-open` stops
+/// every `up` from opening a browser on the machine running it.
+fn storybook_target(kind: &str, script: &str) -> Result<String> {
+    let port = format!("${{{STORYBOOK_PORT}:-{STORYBOOK_PREFER}}}");
+    let mut out = String::new();
+    match kind {
+        // `npm run` consumes everything that is not behind the separator; pnpm,
+        // yarn and bun forward the rest themselves.
+        "npm" => writeln!(
+            out,
+            "target = {{ kind = \"npm\", script = \"{script}\", args = [\"--\", \"-p\", \"{port}\", \"--no-open\"] }}"
+        )?,
+        "pnpm" => writeln!(
+            out,
+            "target = {{ kind = \"pnpm\", script = \"{script}\", args = [\"-p\", \"{port}\", \"--no-open\"] }}"
+        )?,
+        // Neither is a first-class target, so the command is written out, as it
+        // is for any other yarn or bun run answer.
+        "yarn" | "bun" => {
+            writeln!(out, "command = \"{kind} run {script} -p {port} --no-open\"")?
+        }
+        other => bail!("unsupported Storybook answer (unknown runner '{other}')"),
+    }
+    let _ = writeln!(
+        out,
+        "port = {{ env = \"{STORYBOOK_PORT}\", prefer = {STORYBOOK_PREFER} }}"
+    );
+    Ok(out)
 }
 
 /// Names that conventionally mark a one-shot initialiser rather than a server.
@@ -354,6 +444,11 @@ pub fn warnings(report: &Report, answers: &AnswerSet) -> Vec<String> {
         let Some((kind, rest)) = spec.split_once(':') else {
             continue;
         };
+        // Storybook is started with the allocated port on its command line, so
+        // the literal its script pins is overridden rather than a hazard.
+        if serves_storybook(report, &app.id, spec) {
+            continue;
+        }
         let sites = match kind {
             "npm" | "pnpm" | "yarn" | "bun" => ports::sites(&facts, FactKind::Node, rest),
             "just" => ports::sites(&facts, FactKind::Just, rest),

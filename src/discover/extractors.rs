@@ -16,6 +16,16 @@ const COMPOSE_NAMES: &[&str] = &[
     "docker-compose.yml",
 ];
 
+/// Storybook's configuration directory and the files that are its entry point.
+const STORYBOOK_DIR: &str = ".storybook";
+const STORYBOOK_MAIN: &[&str] = &[
+    "main.ts", "main.mts", "main.cts", "main.js", "main.mjs", "main.cjs",
+];
+
+/// Script names a repository conventionally gives the Storybook dev server.
+/// The static build is not one of them, and neither is a test or an upgrade.
+const STORYBOOK_DEV_SCRIPTS: &[&str] = &["storybook", "storybook:dev", "storybook-dev", "sb"];
+
 pub fn extract(root: &Path) -> Result<Report> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let repo = Repo::open(&root).ok();
@@ -267,12 +277,24 @@ impl Builder {
                     .iter()
                     .map(|script| (script.name.as_str(), script.command.as_str())),
             );
-            let dependencies = ["dependencies", "devDependencies"]
+            let dependencies: Vec<String> = ["dependencies", "devDependencies"]
                 .iter()
                 .filter_map(|key| value.get(key))
                 .filter_map(|deps| deps.as_object())
                 .flat_map(|deps| deps.keys().cloned())
                 .collect();
+            let package_manager = value
+                .get("packageManager")
+                .and_then(|manager| manager.as_str())
+                .map(|manager| manager.to_string());
+            // Storybook is a server of its own rather than another way to start
+            // the app, so it is recorded before the node fact takes the scripts.
+            let storybook = storybook_facts(
+                &app_root,
+                &scripts,
+                &dependencies,
+                package_manager.as_deref(),
+            );
             self.push(
                 &package_json,
                 FactKind::Node,
@@ -283,16 +305,22 @@ impl Builder {
                         .get("name")
                         .and_then(|name| name.as_str())
                         .map(|name| name.to_string()),
-                    package_manager: value
-                        .get("packageManager")
-                        .and_then(|manager| manager.as_str())
-                        .map(|manager| manager.to_string()),
+                    package_manager,
                     scripts,
                     has_workspaces: value.get("workspaces").is_some(),
                     dependencies,
                     ports,
                 },
             );
+            if let Some((source, data)) = storybook {
+                self.push(
+                    &source,
+                    FactKind::Storybook,
+                    Some(app_id),
+                    Confidence::High,
+                    data,
+                );
+            }
         }
 
         let pyproject = app_root.join("pyproject.toml");
@@ -927,6 +955,34 @@ fn derive_unknowns(root: &Path, apps: &[AppFacts], facts: &[Fact]) -> Vec<Unknow
         });
     }
 
+    // Storybook is a second server, not another way to start the app: its dev
+    // server runs beside the app's own, and it is what an agent talks to over
+    // MCP. A repository that declares one is asked whether to manage it.
+    for app in apps {
+        let candidates = storybook_candidates(app, facts);
+        if candidates.is_empty() {
+            continue;
+        }
+        let mut options: Vec<String> = vec!["skip".to_string()];
+        options.extend(candidates.iter().map(|candidate| candidate.value.clone()));
+        let default = candidates.first().map(|candidate| candidate.value.clone());
+        unknowns.push(Unknown {
+            id: format!("{}.storybook", app.id),
+            scope: Scope::App {
+                app: app.id.clone(),
+            },
+            kind: UnknownKind::Choice,
+            question: "Which script serves Storybook, when it should run beside the app?"
+                .to_string(),
+            options,
+            evidence: candidates
+                .iter()
+                .map(|candidate| candidate.evidence.clone())
+                .collect(),
+            default,
+        });
+    }
+
     unknowns
 }
 
@@ -992,14 +1048,7 @@ fn setup_candidates(root: &Path, app: &AppFacts, facts: &[Fact]) -> Vec<Candidat
                 } else {
                     root.join(&app.dir)
                 };
-                let from_lock = install_command(&app_root)
-                    .and_then(|command| command.split_whitespace().next().map(str::to_string));
-                let runner = match package_manager.as_deref().map(str::to_string).or(from_lock) {
-                    Some(value) if value.starts_with("pnpm") => "pnpm",
-                    Some(value) if value.starts_with("yarn") => "yarn",
-                    Some(value) if value.starts_with("bun") => "bun",
-                    _ => "npm",
-                };
+                let runner = node_runner(&app_root, package_manager.as_deref());
                 for script in scripts {
                     if is_generation(&script.name) {
                         out.push(Candidate {
@@ -1066,6 +1115,135 @@ fn port_variable_candidates(app: &AppFacts, facts: &[Fact]) -> Vec<String> {
     ordered
 }
 
+/// The runner a package script is invoked through. `packageManager` is optional,
+/// so the lockfiles are the fallback rather than assuming npm.
+fn node_runner(app_root: &Path, package_manager: Option<&str>) -> &'static str {
+    let from_lock = install_command(app_root)
+        .and_then(|command| command.split_whitespace().next().map(str::to_string));
+    match package_manager.map(str::to_string).or(from_lock) {
+        // A manager we have no target for falls through to npm's spelling, so
+        // nothing is silently reinterpreted.
+        Some(value) if value.starts_with("pnpm") => "pnpm",
+        Some(value) if value.starts_with("yarn") => "yarn",
+        Some(value) if value.starts_with("bun") => "bun",
+        _ => "npm",
+    }
+}
+
+/// Storybook's configuration directory and the `main.*` inside it, if any.
+fn storybook_config(app_root: &Path) -> Option<(String, Option<std::path::PathBuf>)> {
+    let dir = app_root.join(STORYBOOK_DIR);
+    if !dir.is_dir() {
+        return None;
+    }
+    let main = STORYBOOK_MAIN
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file());
+    Some((STORYBOOK_DIR.to_string(), main))
+}
+
+/// What an app says about Storybook: the config directory it reads, the steps
+/// that serve it, and whether the MCP addon is installed.
+///
+/// Only a package script can be a step. Storybook is a Node tool and
+/// `create-storybook` writes that script; a task runner wrapping it would have
+/// to forward the arguments the service is started with, which discovery cannot
+/// check. The fact is not emitted at all when nothing indicates Storybook, so
+/// an app is never asked about a tool it does not use.
+fn storybook_facts(
+    app_root: &Path,
+    scripts: &[ScriptFact],
+    dependencies: &[String],
+    package_manager: Option<&str>,
+) -> Option<(std::path::PathBuf, FactData)> {
+    let config = storybook_config(app_root);
+    let declared = config.is_some()
+        || dependencies
+            .iter()
+            .any(|name| name == "storybook" || name.starts_with("@storybook/"));
+    // A script that runs the dev server is evidence on its own: a hoisted
+    // workspace can leave the dependency list and the config directory
+    // somewhere discovery does not look from here.
+    if !declared
+        && !scripts
+            .iter()
+            .any(|script| runs_storybook_dev(&script.command))
+    {
+        return None;
+    }
+    let runner = node_runner(app_root, package_manager);
+    let dev_scripts: Vec<String> = scripts
+        .iter()
+        .filter(|script| is_storybook_dev(&script.name, &script.command, declared))
+        .map(|script| format!("{runner}:{}", script.name))
+        .collect();
+    let source = config
+        .as_ref()
+        .and_then(|(_, main)| main.clone())
+        .unwrap_or_else(|| app_root.join("package.json"));
+    Some((
+        source,
+        FactData::Storybook {
+            config_dir: config.map(|(dir, _)| dir),
+            dev_scripts,
+            has_mcp: dependencies
+                .iter()
+                .any(|name| name == "@storybook/addon-mcp"),
+        },
+    ))
+}
+
+/// True when a command line runs Storybook's dev server, however it is invoked:
+/// `storybook dev`, `npx storybook dev`, `pnpm exec storybook dev`.
+fn runs_storybook_dev(command: &str) -> bool {
+    let command = command.trim_start();
+    if command.contains("storybook build") {
+        return false;
+    }
+    command.contains("storybook dev") || command.contains("start-storybook")
+}
+
+/// True when a package script serves the Storybook dev server rather than
+/// building it or doing something else to it.
+///
+/// A command that runs the dev server is enough on its own. A conventional name
+/// counts only when the app declares Storybook somewhere, so a script that
+/// happens to be called `storybook` is not taken for one.
+fn is_storybook_dev(name: &str, command: &str, declared: bool) -> bool {
+    runs_storybook_dev(command)
+        || (declared && STORYBOOK_DEV_SCRIPTS.contains(&name.to_ascii_lowercase().as_str()))
+}
+
+/// Steps that serve Storybook, as choices the way the run answers are: the app
+/// has to be able to start it beside the app's own dev server, not instead of it.
+fn storybook_candidates(app: &AppFacts, facts: &[Fact]) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    for fact in facts
+        .iter()
+        .filter(|fact| fact.app.as_deref() == Some(app.id.as_str()))
+    {
+        let FactData::Storybook { dev_scripts, .. } = &fact.data else {
+            continue;
+        };
+        for spec in dev_scripts {
+            out.push(Candidate {
+                value: spec.clone(),
+                score: 100,
+                evidence: fact.id.clone(),
+            });
+        }
+    }
+    out.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then(left.value.cmp(&right.value))
+    });
+    out.dedup_by(|left, right| left.value == right.value);
+    out
+}
+
 /// Candidate ways to run an app, drawn only from files that exist.
 fn run_candidates(root: &Path, app: &AppFacts, facts: &[Fact]) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
@@ -1079,28 +1257,12 @@ fn run_candidates(root: &Path, app: &AppFacts, facts: &[Fact]) -> Vec<Candidate>
                 package_manager,
                 ..
             } => {
-                // `packageManager` is optional, so fall back to whatever the
-                // lockfiles say rather than assuming npm.
                 let app_root = if app.dir == "." {
                     root.to_path_buf()
                 } else {
                     root.join(&app.dir)
                 };
-                let from_lock = install_command(&app_root)
-                    .and_then(|command| command.split_whitespace().next().map(str::to_string));
-                let runner = match package_manager.as_deref().map(str::to_string).or(from_lock) {
-                    Some(value) if value.starts_with("pnpm") => "pnpm",
-                    Some(value) if value.starts_with("yarn") => "yarn",
-                    Some(value) if value.starts_with("bun") => "bun",
-                    Some(value) if value.starts_with("npm") => "npm",
-                    Some(value) => {
-                        // A manager we have no target for: fall through to a
-                        // plain command so nothing is reinterpreted.
-                        let _ = value;
-                        "npm"
-                    }
-                    None => "npm",
-                };
+                let runner = node_runner(&app_root, package_manager.as_deref());
                 for script in scripts {
                     let score = match script.name.as_str() {
                         "dev" => 100,

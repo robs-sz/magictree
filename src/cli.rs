@@ -329,10 +329,7 @@ fn cmd_discover(args: DiscoverArgs) -> Result<()> {
                 }
                 for (fact, literal) in pinned {
                     let container = literal.container.clone().unwrap_or_default();
-                    // With no manifest there is nothing to point at yet, so a
-                    // committed template only gets the generic advice.
-                    let suggestion_variable =
-                        (fact.kind != discover::report::FactKind::EnvExample).then_some("PORT");
+                    let suggestion_variable = port_variable_for(&report, fact, literal);
                     println!(
                         "{:<6} {:<24} {:<24} {}",
                         fact.id,
@@ -368,6 +365,34 @@ fn cmd_discover(args: DiscoverArgs) -> Result<()> {
     Ok(())
 }
 
+/// The variable a pinned port should read in `discover`'s advice.
+///
+/// With no manifest there is nothing to point at yet, so the answer is generic —
+/// except for a script that serves Storybook, which reads no variable at all:
+/// the one `init` hands it is the one a rewrite has to name.
+fn port_variable_for(
+    report: &discover::Report,
+    fact: &discover::Fact,
+    literal: &discover::report::PortLiteralFact,
+) -> Option<&'static str> {
+    use discover::report::FactKind;
+    if fact.kind == FactKind::EnvExample {
+        // A committed template is nobody's process yet.
+        return None;
+    }
+    let step = literal.container.as_deref().unwrap_or_default();
+    let app = fact.app.as_deref().unwrap_or_default();
+    let storybook = report
+        .storybook_scripts(app)
+        .iter()
+        .any(|spec| spec.split_once(':').map(|(_, script)| script) == Some(step));
+    Some(if storybook {
+        init::STORYBOOK_PORT
+    } else {
+        "PORT"
+    })
+}
+
 fn describe_fact(data: &discover::FactData) -> String {
     use discover::FactData as Data;
     match data {
@@ -390,6 +415,16 @@ fn describe_fact(data: &discover::FactData) -> String {
             package_manager.clone().unwrap_or_else(|| "unknown".into())
         ),
         Data::Workspace { tool, packages } => format!("{tool}, {} package(s)", packages.len()),
+        Data::Storybook {
+            config_dir,
+            dev_scripts,
+            has_mcp,
+        } => format!(
+            "storybook, config {}, {} dev script(s){}",
+            config_dir.clone().unwrap_or_else(|| "none".into()),
+            dev_scripts.len(),
+            if *has_mcp { ", MCP addon" } else { "" }
+        ),
         Data::Mise { tasks, tools, .. } => {
             format!("{} task(s), {} tool(s)", tasks.len(), tools.len())
         }

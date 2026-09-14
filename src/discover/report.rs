@@ -62,6 +62,7 @@ pub struct Fact {
 pub enum FactKind {
     Compose,
     Node,
+    Storybook,
     Workspace,
     Mise,
     Just,
@@ -96,6 +97,18 @@ pub enum FactData {
         /// Ports written into a script rather than read from the environment.
         #[serde(default)]
         ports: Vec<PortLiteralFact>,
+    },
+    Storybook {
+        /// Configuration directory Storybook reads, when the app has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_dir: Option<String>,
+        /// Steps that serve the dev server, in the `<runner>:<script>` form the
+        /// run answers use.
+        #[serde(default)]
+        dev_scripts: Vec<String>,
+        /// `@storybook/addon-mcp` is installed, so the dev server also answers
+        /// the MCP endpoint an agent connects to.
+        has_mcp: bool,
     },
     Workspace {
         tool: String,
@@ -334,6 +347,35 @@ impl Report {
 
     pub fn fact_evidence(&self, id: &str) -> Option<&Fact> {
         self.facts.iter().find(|fact| fact.id == id)
+    }
+
+    /// The steps an app declares that serve Storybook, as `<runner>:<script>`.
+    ///
+    /// They are the ones that need their port passed on the command line:
+    /// Storybook's dev server reads no environment variable of its own.
+    pub fn storybook_scripts(&self, app: &str) -> Vec<&str> {
+        self.facts
+            .iter()
+            .filter(|fact| fact.app.as_deref() == Some(app))
+            .filter_map(|fact| match &fact.data {
+                FactData::Storybook { dev_scripts, .. } => {
+                    Some(dev_scripts.iter().map(String::as_str))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// True when an app installs the addon that answers MCP from the dev server.
+    pub fn storybook_has_mcp(&self, app: &str) -> bool {
+        self.facts
+            .iter()
+            .filter(|fact| fact.app.as_deref() == Some(app))
+            .any(|fact| match &fact.data {
+                FactData::Storybook { has_mcp, .. } => *has_mcp,
+                _ => false,
+            })
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {

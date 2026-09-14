@@ -76,6 +76,7 @@ writes from it:
 | yarn, bun | the same files | a plain `command = "yarn run dev"`; both are detected, but neither is a first-class target |
 | pnpm / npm / yarn workspaces, Lerna | `pnpm-workspace.yaml`, `package.json` `workspaces`, `lerna.json` | `[workspace] apps` |
 | Python | `pyproject.toml`, `uv.lock`, `poetry.lock` | `target = { kind = "uv", script = "..." }`, and the install step |
+| Storybook | a `package.json` script that runs `storybook dev`, `.storybook/`, an `@storybook/*` dependency | a second `storybook` service, beside the app's own |
 | just | `justfile` recipes, and the variables they read | `target = { kind = "just", recipe = "..." }`, a port variable, or an inlined `command` |
 | mise | `mise.toml` tasks, tools, env, profiles | `target = { kind = "mise", task = "..." }` |
 | Procfile | process types | a run candidate whose command still has to be filled in |
@@ -86,6 +87,24 @@ writes from it:
 The install step and its `inputs` cache key come from whichever lockfile is present:
 `pnpm-lock.yaml`, `yarn.lock`, `bun.lock{b}`, `package-lock.json`, `uv.lock`, `poetry.lock`,
 else `package.json` or `pyproject.toml`.
+
+Storybook is the one service whose flags the manifest supplies. Its dev server takes `-p`/`--port`
+and reads no environment variable of its own, so `init` appends the allocated port — and
+`--no-open`, which keeps `up` from opening a browser — to the repository's own script:
+
+```toml
+[[services]]
+id = "storybook"
+target = { kind = "pnpm", script = "storybook", args = ["-p", "${STORYBOOK_PORT:-6006}", "--no-open"] }
+port = { env = "STORYBOOK_PORT", prefer = 6006 }
+health = { http = "/", timeout = 120 }
+```
+
+The appended flag lands after the script's own, so it beats whatever the script pins and every
+worktree gets its own URL; that is why `doctor` stays quiet about a `-p` a storybook script
+pins. `prefer = 6006` keeps Storybook on its familiar port in the first worktree. When
+`@storybook/addon-mcp` is installed, that URL also answers MCP at `/mcp`, which is how an agent
+reads and drives the components.
 
 ### Top level
 
