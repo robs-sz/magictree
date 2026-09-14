@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: $(basename "$0") patch|minor|major"
+usage="usage: $(basename "$0") patch|minor|major|current"
 
 bump="${1-}"
 case "$bump" in
-  patch | minor | major) ;;
+  patch | minor | major | current) ;;
   *)
     echo "$usage" >&2
     exit 2
@@ -31,22 +31,28 @@ if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
 fi
 
 current="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-IFS=. read -r major minor patch <<<"$current"
 
-case "$bump" in
-  patch) patch=$((patch + 1)) ;;
-  minor)
-    minor=$((minor + 1))
-    patch=0
-    ;;
-  major)
-    major=$((major + 1))
-    minor=0
-    patch=0
-    ;;
-esac
+if [ "$bump" = current ]; then
+  next="$current"
+else
+  IFS=. read -r major minor patch <<<"$current"
 
-next="$major.$minor.$patch"
+  case "$bump" in
+    patch) patch=$((patch + 1)) ;;
+    minor)
+      minor=$((minor + 1))
+      patch=0
+      ;;
+    major)
+      major=$((major + 1))
+      minor=0
+      patch=0
+      ;;
+  esac
+
+  next="$major.$minor.$patch"
+fi
+
 tag="v$next"
 
 if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
@@ -54,12 +60,15 @@ if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
   exit 1
 fi
 
-perl -i -pe "if (!\$done && s/^version = \"\Q$current\E\"\$/version = \"$next\"/) { \$done = 1 }" Cargo.toml
-cargo update --workspace --quiet
-
 echo "releasing $tag"
-git add Cargo.toml Cargo.lock
-git commit -m "release $tag"
+
+if [ "$next" != "$current" ]; then
+  perl -i -pe "if (!\$done && s/^version = \"\Q$current\E\"\$/version = \"$next\"/) { \$done = 1 }" Cargo.toml
+  cargo update --workspace --quiet
+  git add Cargo.toml Cargo.lock
+  git commit -m "release $tag"
+  git push origin main
+fi
+
 git tag -a "$tag" -m "$tag"
-git push origin main
 git push origin "$tag"
