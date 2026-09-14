@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 #[command(
     name = "magictree",
     version,
-    about = "Per-worktree development environments"
+    about = "magictree - per-worktree development environments"
 )]
 pub struct Cli {
     /// Print what would happen and create nothing.
@@ -117,9 +117,6 @@ pub struct InitArgs {
 
 #[derive(Args)]
 pub struct DoctorArgs {
-    /// Refresh the cached discovery report first.
-    #[arg(long)]
-    pub refresh: bool,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 }
@@ -252,7 +249,7 @@ pub struct EnvArgs {
 pub fn dispatch(cli: Cli) -> Result<()> {
     let dry_run = cli.dry_run;
     match cli.command {
-        Command::Discover(args) => cmd_discover(args),
+        Command::Discover(args) => cmd_discover(args, dry_run),
         Command::Init(args) => cmd_init(args, dry_run),
         Command::Doctor(args) => cmd_doctor(args),
         Command::New(args) => cmd_new(args, dry_run),
@@ -278,7 +275,7 @@ fn cmd_completion(args: CompletionArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_discover(args: DiscoverArgs) -> Result<()> {
+fn cmd_discover(args: DiscoverArgs, dry_run: bool) -> Result<()> {
     let root = resolve_cwd(args.cwd)?;
     let report = discover::extract(&root)?;
     if args.default_answers {
@@ -289,13 +286,22 @@ fn cmd_discover(args: DiscoverArgs) -> Result<()> {
     let payload = serde_json::to_string_pretty(&report)?;
     match args.report {
         Some(path) => {
-            report.write(&path)?;
-            println!(
-                "wrote {} ({} facts, {} unknowns)",
-                path.display(),
-                report.facts.len(),
-                report.unknowns.len()
-            );
+            if dry_run {
+                println!(
+                    "dry run: would write {} ({} facts, {} unknowns)",
+                    path.display(),
+                    report.facts.len(),
+                    report.unknowns.len()
+                );
+            } else {
+                report.write(&path)?;
+                println!(
+                    "wrote {} ({} facts, {} unknowns)",
+                    path.display(),
+                    report.facts.len(),
+                    report.unknowns.len()
+                );
+            }
         }
         None => {
             if args.json || !std::io::stdout().is_terminal() {
@@ -513,9 +519,6 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
         }
     };
     let record = init::record(&report, &answers, &recorded, &asked);
-    if let Some(path) = &args.save_answers {
-        answers.write(path)?;
-    }
     let planned = init::plan(&report, &answers, &record, &root)?;
     for warning in init::warnings(&report, &answers) {
         eprintln!("warning: {warning}");
@@ -532,6 +535,9 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
             println!();
         }
         return Ok(());
+    }
+    if let Some(path) = &args.save_answers {
+        answers.write(path)?;
     }
     for applied in init::apply(&planned, args.force)? {
         match applied {
@@ -576,7 +582,6 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
 
 fn cmd_doctor(args: DoctorArgs) -> Result<()> {
     let root = resolve_cwd(args.cwd)?;
-    let _ = args.refresh;
     let drift = doctor::check(&root)?;
     if drift.is_empty() {
         println!("no drift: manifests match the repository");
@@ -618,11 +623,14 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
     };
     if dry_run {
         println!("dry run: no worktree is created");
-        println!(
-            "would run git worktree add {} {}",
-            args.branch,
-            path.display()
+        let planned = worktrees::add_args(
+            &repo,
+            &args.branch,
+            args.base.as_deref(),
+            &path,
+            args.detach,
         );
+        println!("would run git {}", planned.join(" "));
         println!("would then run ensure in {}", path.display());
         return Ok(());
     }
@@ -677,6 +685,13 @@ fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
         // Stop whatever this worktree recorded, even if its manifest is gone or
         // no longer parses. Without this the checkout disappears while its
         // processes keep running and their pid files with it.
+        if !target.exists() {
+            bail!(
+                "worktree checkout {} is already gone\n\nrun `magictree gc --prune` to release its \
+                 port block and drop its recorded processes",
+                target.display()
+            );
+        }
         let runtime_dir = runtime_dir_for(&Paths::new()?, &Repo::open(&target)?);
         match ctx_stop_recorded(&runtime_dir) {
             Ok(stopped) => {
@@ -1160,6 +1175,11 @@ fn follow(path: &Path, mut offset: u64) -> Result<()> {
         sleep(Duration::from_millis(300));
         let mut file = File::open(path)?;
         let length = file.metadata()?.len();
+        if length < offset {
+            // Truncated or rotated (`up` truncates the log on every start):
+            // restart from the top instead of waiting for the file to regrow.
+            offset = 0;
+        }
         if length > offset {
             file.seek(SeekFrom::Start(offset))?;
             let mut buffer = String::new();
@@ -1326,8 +1346,14 @@ fn wait_for_exit(
         if let Some(entry) = states.iter().find(|entry| entry.service == container) {
             if entry.state.eq_ignore_ascii_case("exited") {
                 return match entry.exit_code {
-                    Some(0) | None => Ok(()),
+                    Some(0) => Ok(()),
                     Some(code) => bail!("'{container}' exited with status {code}"),
+                    // Fail closed: a migration whose exit code is unknown is
+                    // not a success we can vouch for.
+                    None => bail!(
+                        "'{container}' exited but docker compose did not report its exit code; \
+                         inspect it with `docker compose logs {container}`"
+                    ),
                 };
             }
         }

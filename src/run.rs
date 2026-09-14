@@ -29,7 +29,41 @@ pub fn log_file(runtime_dir: &Path, name: &str) -> PathBuf {
 
 pub fn read_pid(runtime_dir: &Path, name: &str) -> Option<i32> {
     let raw = std::fs::read_to_string(pid_file(runtime_dir, name)).ok()?;
-    raw.trim().parse::<i32>().ok()
+    raw.split_whitespace().next()?.parse::<i32>().ok()
+}
+
+/// The start-time stamp recorded next to the pid, when the pid file carries
+/// one. Files written by older magictree versions hold only the pid.
+fn read_stamp(runtime_dir: &Path, name: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(pid_file(runtime_dir, name)).ok()?;
+    raw.split_whitespace()
+        .nth(1)
+        .map(str::to_string)
+        .filter(|stamp| !stamp.is_empty())
+}
+
+/// The kernel start time of `pid`, collapsed to a single token (the pid file
+/// keeps pid and stamp on one space-separated line), or None when the pid has
+/// no process behind it. Compared against the pid file's stamp, so a pid
+/// recycled after a reboot or wraparound is never mistaken for the recorded
+/// process and signalled.
+fn process_start(pid: i32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token: String = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("_");
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 pub fn is_alive(pid: i32) -> bool {
@@ -83,12 +117,13 @@ pub fn start(
         let _ = child.wait();
     });
 
+    let stamp = process_start(pid).unwrap_or_default();
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(pid_file(runtime_dir, name))?;
-    writeln!(file, "{pid}")?;
+    writeln!(file, "{pid} {stamp}")?;
     Ok(pid)
 }
 
@@ -98,7 +133,15 @@ pub fn stop(runtime_dir: &Path, name: &str, timeout: Duration) -> Result<bool> {
         return Ok(false);
     };
     let path = pid_file(runtime_dir, name);
-    if !is_alive(pid) {
+    let stamp = read_stamp(runtime_dir, name);
+    // The pid file names this worktree's process only while the kernel start
+    // time still matches what was recorded. Without the stamp (an older pid
+    // file) liveness alone decides, as before.
+    let owned = |pid: i32| match &stamp {
+        Some(stamp) => process_start(pid).as_deref() == Some(stamp.as_str()),
+        None => is_alive(pid),
+    };
+    if !is_alive(pid) || !owned(pid) {
         let _ = std::fs::remove_file(&path);
         return Ok(false);
     }
@@ -111,7 +154,11 @@ pub fn stop(runtime_dir: &Path, name: &str, timeout: Duration) -> Result<bool> {
         sleep(Duration::from_millis(100));
     }
     if is_alive(pid) {
-        let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        if owned(pid) {
+            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        }
+        // The pid was recycled mid-wait; the original process is gone either
+        // way, and the newcomer is not ours to kill.
     }
     let _ = std::fs::remove_file(&path);
     Ok(true)

@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::paths::Paths;
 use crate::ports::{self, Assignment};
 use crate::repo::is_tracked;
@@ -39,24 +40,7 @@ pub fn create(
         bail!("target path already exists: {}", path.display());
     }
 
-    let mut args: Vec<String> = vec!["worktree".into(), "add".into()];
-    if detach {
-        args.push("--detach".into());
-        if let Some(base) = base {
-            args.push(base.to_string());
-        } else {
-            args.push("HEAD".into());
-        }
-        args.push(path.to_string_lossy().to_string());
-    } else if branch_exists(repo, branch) {
-        args.push(path.to_string_lossy().to_string());
-        args.push(branch.to_string());
-    } else {
-        args.push("-b".into());
-        args.push(branch.to_string());
-        args.push(path.to_string_lossy().to_string());
-        args.push(base.unwrap_or("HEAD").to_string());
-    }
+    let args = add_args(repo, branch, base, &path, detach);
 
     let output = Command::new("git")
         .arg("-C")
@@ -71,6 +55,34 @@ pub fn create(
         );
     }
     Ok(path)
+}
+
+/// The exact git arguments `create` runs, shared with the dry-run printer so
+/// the two can never disagree.
+pub fn add_args(
+    repo: &Repo,
+    branch: &str,
+    base: Option<&str>,
+    path: &Path,
+    detach: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec!["worktree".into(), "add".into()];
+    if detach {
+        // git's contract is `worktree add [--detach] <path> [<commit-ish>]`:
+        // the path comes first, the revision after it.
+        args.push("--detach".into());
+        args.push(path.to_string_lossy().to_string());
+        args.push(base.unwrap_or("HEAD").to_string());
+    } else if branch_exists(repo, branch) {
+        args.push(path.to_string_lossy().to_string());
+        args.push(branch.to_string());
+    } else {
+        args.push("-b".into());
+        args.push(branch.to_string());
+        args.push(path.to_string_lossy().to_string());
+        args.push(base.unwrap_or("HEAD").to_string());
+    }
+    args
 }
 
 /// Remove a worktree. The branch is never deleted.
@@ -316,6 +328,7 @@ fn gc_scoped(
     apply: bool,
 ) -> Result<()> {
     let blocks = paths.blocks_dir();
+    let stride = Config::load(paths)?.port_stride;
     let mut released = 0usize;
     if blocks.exists() {
         for entry in std::fs::read_dir(&blocks)?.flatten() {
@@ -342,7 +355,7 @@ fn gc_scoped(
                     "{} block {}-{} (worktree {})",
                     if apply { "released" } else { "would release" },
                     assignment.base,
-                    assignment.base.saturating_add(1),
+                    assignment.base.saturating_add(stride - 1),
                     assignment.worktree_id
                 );
                 if apply {
@@ -414,7 +427,15 @@ fn read_assignment(path: &Path) -> Option<Assignment> {
         return None;
     }
     let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Assignment>(&raw).ok()
+    match serde_json::from_str::<Assignment>(&raw) {
+        Ok(assignment) => Some(assignment),
+        Err(_) => {
+            // A corrupt block must not read as "no ports reserved": another
+            // worktree would claim them while the owner still holds them.
+            eprintln!("warning: ignoring unreadable port block {}", path.display());
+            None
+        }
+    }
 }
 
 /// Stop the supervised processes of worktrees whose checkout is gone, then drop
@@ -590,13 +611,23 @@ fn sweep_compose(
     Ok(())
 }
 
-/// Run a docker command, returning None when docker is unavailable.
+/// Run a docker command, returning None when docker cannot be consulted. Both
+/// failure shapes are reported, so a sweep never presents a clean result that
+/// is really "docker is broken".
 fn docker_ids(args: &[&str]) -> Result<Option<String>> {
     let output = match Command::new("docker").args(args).output() {
         Ok(output) => output,
-        Err(_) => return Ok(None),
+        Err(_) => {
+            eprintln!("warning: docker is not available; compose checks were skipped");
+            return Ok(None);
+        }
     };
     if !output.status.success() {
+        eprintln!(
+            "warning: docker {} failed ({}); compose checks were skipped",
+            args.first().copied().unwrap_or("command"),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))

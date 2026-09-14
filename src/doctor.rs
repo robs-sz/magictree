@@ -4,7 +4,7 @@
 use crate::discover::extract;
 use crate::discover::ports;
 use crate::discover::report::{Fact, FactData, FactKind, PortLiteralFact, Report};
-use crate::manifest::{Expose, Loaded, NodeKind, Runtime, Service, Target};
+use crate::manifest::{Expose, Loaded, Manifest, Service, Target};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -51,6 +51,21 @@ pub fn check(root: &Path) -> Result<Vec<Drift>> {
     let report = extract(root)?;
     let loaded = Loaded::load(root)?;
     Ok(compare(&report, &loaded))
+}
+
+/// Every manifest doctor checks: each app plus the workspace manifest, which
+/// holds the services every app depends on. A root that is itself an app
+/// already appears in `apps`, so the workspace pass would only duplicate it.
+fn manifest_scopes(loaded: &Loaded) -> Vec<(&Path, &str, &Manifest)> {
+    let mut scopes: Vec<(&Path, &str, &Manifest)> = loaded
+        .apps
+        .iter()
+        .map(|app| (app.dir.as_path(), app.id.as_str(), &app.manifest))
+        .collect();
+    if !loaded.root_is_app {
+        scopes.push((loaded.workspace_dir.as_path(), "", &loaded.workspace));
+    }
+    scopes
 }
 
 pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
@@ -131,10 +146,10 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
     }
 
     // Targets: the script, recipe, or task must still exist.
-    for app in &loaded.apps {
-        let rel = relative(&loaded.workspace_dir, &app.dir);
-        let facts = app_facts(report, &app.id, &rel);
-        for service in &app.manifest.services {
+    for (dir, id, manifest) in manifest_scopes(loaded) {
+        let rel = relative(&loaded.workspace_dir, dir);
+        let facts = app_facts(report, id, &rel);
+        for service in &manifest.services {
             let Some(target) = &service.target else {
                 continue;
             };
@@ -155,10 +170,10 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
 
     // A port variable the app cannot read means the service listens on its own
     // default while the health probe watches the allocated port.
-    for app in &loaded.apps {
-        let rel = relative(&loaded.workspace_dir, &app.dir);
-        let facts = app_facts(report, &app.id, &rel);
-        for service in &app.manifest.services {
+    for (dir, id, manifest) in manifest_scopes(loaded) {
+        let rel = relative(&loaded.workspace_dir, dir);
+        let facts = app_facts(report, id, &rel);
+        for service in &manifest.services {
             let Some(variable) = service
                 .port
                 .as_ref()
@@ -208,11 +223,11 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
     // magictree injects, so that service can never follow a per-worktree port:
     // the second worktree to start would try to bind the same number.
     let mut reported: BTreeSet<(String, String)> = BTreeSet::new();
-    for app in &loaded.apps {
-        let rel = relative(&loaded.workspace_dir, &app.dir);
-        let facts = app_facts(report, &app.id, &rel);
-        for service in &app.manifest.services {
-            let advice = port_advice(loaded, &app.id, service);
+    for (dir, id, manifest) in manifest_scopes(loaded) {
+        let rel = relative(&loaded.workspace_dir, dir);
+        let facts = app_facts(report, id, &rel);
+        for service in &manifest.services {
+            let advice = port_advice(loaded, id, service);
             for pinned in pinned_ports(service, &facts) {
                 if let Some(step) = &pinned.step {
                     reported.insert(step.clone());
@@ -360,8 +375,6 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
         }
     }
 
-    let _ = Runtime::Compose;
-    let _ = NodeKind::Service;
     drift
 }
 
@@ -457,10 +470,17 @@ fn command_hands_over(service: &Service, variable: &str) -> bool {
         (None, Some(command)) => command.clone(),
         _ => return false,
     };
-    let Some(at) = command.find(&format!("${{{variable}")) else {
+    let needle = format!("${{{variable}");
+    let Some(at) = command.find(&needle) else {
         return false;
     };
-    !command.starts_with("npm ") || command[..at].contains(" -- ")
+    // The character after the name must not continue it, or looking for
+    // `${APP_PORT}` would also match `${APP_PORT_EXTRA}`.
+    let closes = command[at + needle.len()..]
+        .chars()
+        .next()
+        .map_or(true, |next| !(next.is_ascii_alphanumeric() || next == '_'));
+    closes && (!command.starts_with("npm ") || command[..at].contains(" -- "))
 }
 
 /// Where a service's port should come from, and whether the manifest says so.
@@ -472,7 +492,14 @@ struct PortAdvice {
 }
 
 fn port_advice(loaded: &Loaded, app_id: &str, service: &Service) -> PortAdvice {
-    let fallback = format!("{}_PORT", app_id.to_ascii_uppercase().replace('-', "_"));
+    // Workspace services carry no app id; derive the suggested variable from
+    // the service id instead of an empty prefix.
+    let prefix = if app_id.is_empty() {
+        service.id.as_str()
+    } else {
+        app_id
+    };
+    let fallback = format!("{}_PORT", prefix.to_ascii_uppercase().replace('-', "_"));
     let Some(declared) = service.ports().iter().find_map(|port| port.env.clone()) else {
         return PortAdvice {
             variable: fallback,

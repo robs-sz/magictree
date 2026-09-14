@@ -466,3 +466,40 @@ fn a_worktree_named_main_does_not_share_the_primary_block() {
     );
     assert_ne!(rows[0].2, "-", "list must find the linked worktree's ports");
 }
+
+#[test]
+fn a_detached_worktree_is_created_at_the_requested_path() {
+    let fixture = Fixture::new();
+    fixture.write("magictree.toml", "version = 1\n");
+    fixture.git_repo();
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    let target = fixture.join("detached");
+    let path = worktrees::create(&repo, "scratch", None, Some(&target), true).expect("create");
+
+    assert_eq!(path, target);
+    // The order this pins: git receives `add --detach <path> <commit-ish>`.
+    // The reversed order made git treat the revision as the directory, so
+    // every detached create failed after its pre-flight checks.
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .expect("git rev-parse");
+    assert!(
+        head.status.success(),
+        "{}",
+        String::from_utf8_lossy(&head.stderr)
+    );
+    let branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&path)
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .expect("git symbolic-ref");
+    assert!(
+        !branch.status.success(),
+        "a detached worktree must not sit on a branch"
+    );
+}

@@ -139,7 +139,9 @@ impl Ctx {
 
         if all || !explicit {
             match default_app {
-                Some(app_id) => {
+                // `--all` overrides default-app narrowing: the repository's
+                // whole stack is selected, wherever it lives.
+                Some(app_id) if !all => {
                     for (index, node) in self.nodes.iter().enumerate() {
                         if node.app.as_deref() == Some(app_id.as_str()) && node.is_running_service()
                         {
@@ -148,7 +150,7 @@ impl Ctx {
                         }
                     }
                 }
-                None => {
+                _ => {
                     for (index, node) in self.nodes.iter().enumerate() {
                         if !node.is_running_service() {
                             continue;

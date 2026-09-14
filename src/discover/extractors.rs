@@ -735,13 +735,20 @@ fn is_app_dir(path: &Path) -> bool {
 fn expand_globs(root: &Path, globs: &[String]) -> Vec<String> {
     let mut out = BTreeSet::new();
     for pattern in globs {
-        if let Some(prefix) = pattern.strip_suffix("/*") {
+        let mut matched = BTreeSet::new();
+        if let Some(prefix) = pattern.strip_suffix("/**") {
+            // `apps/**`: app directories at any depth under the prefix.
+            collect_app_dirs(&mut matched, root, &root.join(prefix), 0);
+        } else if let Some(prefix) = pattern
+            .strip_suffix("/*")
+            .or_else(|| pattern.strip_suffix("/*/"))
+        {
             let dir = root.join(prefix);
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for entry in entries.flatten() {
                     if entry.path().is_dir() && is_app_dir(&entry.path()) {
                         if let Some(name) = entry.file_name().to_str() {
-                            out.insert(format!("{prefix}/{name}"));
+                            matched.insert(format!("{prefix}/{name}"));
                         }
                     }
                 }
@@ -749,11 +756,45 @@ fn expand_globs(root: &Path, globs: &[String]) -> Vec<String> {
         } else {
             let candidate = root.join(pattern);
             if candidate.is_dir() {
-                out.insert(pattern.clone());
+                matched.insert(pattern.clone());
             }
         }
+        if matched.is_empty() {
+            eprintln!("warning: workspace glob '{pattern}' matched no app directories");
+        }
+        out.extend(matched);
     }
     out.into_iter().collect()
+}
+
+/// Recursively collect app directories under `dir`, recorded relative to the
+/// workspace root. Generated trees (`node_modules`, build output, hidden
+/// directories) are never descended into.
+fn collect_app_dirs(out: &mut BTreeSet<String>, root: &Path, dir: &Path, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || name == "node_modules" || name == "target" || name == "dist" {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if is_app_dir(&path) {
+            if let Ok(relative) = path.strip_prefix(root) {
+                if let Some(relative) = relative.to_str() {
+                    out.insert(relative.to_string());
+                }
+            }
+        }
+        collect_app_dirs(out, root, &path, depth + 1);
+    }
 }
 
 /// Package-manager install command implied by the lockfiles present.

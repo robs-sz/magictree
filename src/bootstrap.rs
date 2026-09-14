@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::os::unix::fs::symlink;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
@@ -91,12 +91,43 @@ pub fn run_steps(
 fn inputs_digest(worktree_root: &Path, inputs: &[String]) -> Result<String> {
     let mut hasher = Sha256::new();
     for relative in inputs {
-        let path = worktree_root.join(relative);
         hasher.update(relative.as_bytes());
-        match std::fs::read(&path) {
-            Ok(bytes) => hasher.update(&bytes),
-            Err(_) => hasher.update(b"<missing>"),
+        let path = worktree_root.join(relative);
+        let metadata = std::fs::metadata(&path)
+            .with_context(|| format!("bootstrap input '{relative}' does not exist"))?;
+        if metadata.is_dir() {
+            hash_dir(&mut hasher, &path)
+                .with_context(|| format!("hashing bootstrap input '{relative}'"))?;
+        } else {
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading bootstrap input '{relative}'"))?;
+            hasher.update(&bytes);
         }
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Hash a directory tree: names and contents in sorted order, so the digest
+/// changes whenever anything under the directory does. A constant digest would
+/// make the step report "cached" forever.
+fn hash_dir(hasher: &mut Sha256, dir: &Path) -> Result<()> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    entries.sort();
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        hasher.update(name.as_bytes());
+        if entry.is_dir() {
+            hash_dir(hasher, &entry)?;
+        } else if entry.is_file() {
+            hasher.update(&std::fs::read(&entry)?);
+        }
+        // Sockets and other specials contribute their name only.
+    }
+    Ok(())
 }

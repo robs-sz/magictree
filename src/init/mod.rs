@@ -219,7 +219,7 @@ pub fn plan(
                 // reads no environment variable for it.
                 block.push_str(&storybook_target(kind, rest)?);
             } else {
-                block.push_str(&target_line(kind, rest, spec)?);
+                block.push_str(&target_line(kind, rest, spec, report)?);
                 let port_variable = answers
                     .answers
                     .get(&format!("{}.port_env", app.id))
@@ -1089,7 +1089,7 @@ fn step_command(spec: &str) -> Result<String> {
     })
 }
 
-fn target_line(kind: &str, rest: &str, spec: &str) -> Result<String> {
+fn target_line(kind: &str, rest: &str, spec: &str, report: &Report) -> Result<String> {
     let line = match kind {
         "npm" | "pnpm" | "yarn" | "bun" => {
             // Only npm and pnpm have first-class targets; yarn and bun fall back
@@ -1104,10 +1104,28 @@ fn target_line(kind: &str, rest: &str, spec: &str) -> Result<String> {
         "mise" => format!("target = {{ kind = \"mise\", task = \"{rest}\" }}\n"),
         "uv" => format!("target = {{ kind = \"uv\", script = \"{rest}\" }}\n"),
         "command" => format!("command = \"{}\"\n", escape_toml(rest)),
-        "procfile" => format!("command = \"<command from Procfile:{rest}>\"\n"),
+        // Inline the real command from the Procfile fact: a placeholder would
+        // pass manifest validation, but `up` cannot run it.
+        "procfile" => {
+            let command = procfile_command(report, rest)
+                .with_context(|| format!("run answer '{spec}': no Procfile process '{rest}'"))?;
+            format!("command = \"{}\"\n", escape_toml(&command))
+        }
         other => bail!("unsupported run answer '{spec}' (unknown runner '{other}')"),
     };
     Ok(line)
+}
+
+/// The command a Procfile process runs, from discovery facts.
+fn procfile_command(report: &Report, name: &str) -> Result<String> {
+    for fact in &report.facts {
+        if let FactData::Procfile { processes, .. } = &fact.data {
+            if let Some(process) = processes.iter().find(|process| process.name == name) {
+                return Ok(process.command.clone());
+            }
+        }
+    }
+    bail!("Procfile process '{name}' not found in the discovery report")
 }
 
 fn compose_facts(report: &Report) -> Vec<ComposeServiceFact> {

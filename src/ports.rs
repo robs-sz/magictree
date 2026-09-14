@@ -329,6 +329,9 @@ fn read_registry(blocks: &Path) -> Result<Vec<Assignment>> {
             continue;
         };
         let Ok(assignment) = serde_json::from_str::<Assignment>(&raw) else {
+            // A corrupt block must not read as "no ports reserved": another
+            // worktree would claim them while the owner still holds them.
+            eprintln!("warning: ignoring unreadable port block {}", path.display());
             continue;
         };
         assignments.push(assignment);

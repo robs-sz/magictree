@@ -836,3 +836,32 @@ fn discover_init_doctor_round_trip() {
     assert!(up.ok(), "{}", up.combined());
     assert!(up.stdout.contains("pnpm run dev"), "{}", up.stdout);
 }
+
+#[test]
+fn up_all_starts_every_app_even_inside_one() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[workspace]\napps = [\"apps/a\", \"apps/b\"]\n",
+    );
+    fixture.write(
+        "apps/a/magictree.toml",
+        "version = 1\n\n[app]\nid = \"a\"\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.write(
+        "apps/b/magictree.toml",
+        "version = 1\n\n[app]\nid = \"b\"\n\n[[services]]\nid = \"api\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    // Run from inside app a, where the default app exists: `--all` must still
+    // select the whole repository, not just the current app.
+    let up = run(&["up", "--all"], &fixture.join("apps/a"), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(up.stdout.contains("a:web: started"), "{}", up.stdout);
+    assert!(up.stdout.contains("b:api: started"), "{}", up.stdout);
+
+    let down = run(&["down"], fixture.path(), &state);
+    assert!(down.ok(), "{}", down.combined());
+}

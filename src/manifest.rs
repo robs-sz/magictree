@@ -213,7 +213,7 @@ impl Target {
                 let mut command = format!("just {recipe}");
                 for arg in args {
                     command.push(' ');
-                    command.push_str(arg);
+                    command.push_str(&quote_arg(arg));
                 }
                 command
             }
@@ -235,7 +235,7 @@ impl Target {
                     let mut command = format!("{prefix} python -m {module}");
                     for arg in args {
                         command.push(' ');
-                        command.push_str(arg);
+                        command.push_str(&quote_arg(arg));
                     }
                     command
                 } else {
@@ -248,7 +248,7 @@ impl Target {
                 let mut command = format!("python3 -m {module}");
                 for arg in args {
                     command.push(' ');
-                    command.push_str(arg);
+                    command.push_str(&quote_arg(arg));
                 }
                 command
             }
@@ -260,9 +260,26 @@ fn with_args(base: String, args: &[String]) -> String {
     let mut command = base;
     for arg in args {
         command.push(' ');
-        command.push_str(arg);
+        command.push_str(&quote_arg(arg));
     }
     command
+}
+
+/// Quote one argument for the shell command `Target::command` builds.
+///
+/// Arguments are repository-controlled, and `${VAR}` expansion inside them is
+/// a feature (`args = ["-p", "${APP_PORT}"]` relies on it), so quoting only
+/// fires when the argument would otherwise change tokenization: whitespace,
+/// quotes, backslashes, and shell control characters.
+fn quote_arg(arg: &str) -> String {
+    let needs_quoting = arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| matches!(c, ' ' | '\t' | '\n' | '\'' | '"' | '\\' | ';' | '|' | '&' | '(' | ')' | '<' | '>'));
+    if !needs_quoting {
+        return arg.to_string();
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
 #[derive(Debug, Clone, Deserialize)]
