@@ -524,12 +524,7 @@ fn recorded_project(dir: &Path) -> Option<String> {
 /// `recorded` carries the compose project names of dead worktrees, because a
 /// project whose containers are already gone (a manual `docker compose down`
 /// without `-v`, say) is otherwise invisible.
-fn sweep_compose(
-    live: &[PathBuf],
-    repo_key: &str,
-    recorded: &[String],
-    apply: bool,
-) -> Result<()> {
+fn sweep_compose(live: &[PathBuf], repo_key: &str, recorded: &[String], apply: bool) -> Result<()> {
     // Scoped to this repository: another repository's worktrees are not ours to
     // decide about, however stale their paths look from here.
     let filter = format!("label=magictree.repo={repo_key}");

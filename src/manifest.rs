@@ -273,9 +273,12 @@ fn with_args(base: String, args: &[String]) -> String {
 /// quotes, backslashes, and shell control characters.
 fn quote_arg(arg: &str) -> String {
     let needs_quoting = arg.is_empty()
-        || arg
-            .chars()
-            .any(|c| matches!(c, ' ' | '\t' | '\n' | '\'' | '"' | '\\' | ';' | '|' | '&' | '(' | ')' | '<' | '>'));
+        || arg.chars().any(|c| {
+            matches!(
+                c,
+                ' ' | '\t' | '\n' | '\'' | '"' | '\\' | ';' | '|' | '&' | '(' | ')' | '<' | '>'
+            )
+        });
     if !needs_quoting {
         return arg.to_string();
     }

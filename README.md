@@ -1,3 +1,17 @@
+<div align="center"><pre>
+                                   /33
+                                  |__/
+ /333333/3333   /333333   /333333  /33  /3333333
+| 33_  33_  33 |____  33 /33__  33| 33 /33_____/
+| 33 \ 33 \ 33  /3333333| 33  \ 33| 33| 33
+| 33 | 33 | 33 /33__  33| 33  | 33| 33| 33
+| 33 | 33 | 33|  3333333|  3333333| 33|  3333333
+|__/ |__/ |__/ \_______/ \____  33|__/ \_______/
+                         /33  \ 33
+                        |  333333/
+                         \______/
+</pre></div>
+
 # magictree
 
 Per-worktree development stacks. Every git worktree gets its own ports, environment,
@@ -277,3 +291,12 @@ magictree never writes to repository `.env` files.
 `skills/magictree/SKILL.md` teaches a coding agent to operate the CLI. Onboarding belongs to
 the primary checkout: `init` writes the manifest where it runs, so a manifest written inside a
 linked worktree is untracked and no other worktree inherits the stack.
+
+## Development
+
+`cargo fmt --check` runs in the pre-commit hook, so a commit the formatter would rewrite never
+lands. Git does not copy hooks from a clone, so point it at the tracked ones once:
+
+```sh
+git config core.hooksPath .githooks
+```

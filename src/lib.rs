@@ -4,6 +4,7 @@
 //! worktree identity, allocates ports, materialises environment, bootstraps the
 //! checkout, and supervises services.
 
+mod banner;
 pub mod bootstrap;
 pub mod cli;
 pub mod compose;
@@ -23,7 +24,7 @@ pub mod run;
 pub mod slug;
 pub mod worktrees;
 
-pub use cli::{dispatch, Cli};
+pub use cli::{dispatch, parse, Cli};
 pub use config::Config;
 pub use ctx::Ctx;
 pub use paths::Paths;

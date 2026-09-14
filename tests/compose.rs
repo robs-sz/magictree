@@ -23,7 +23,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Lines of stdout from a docker command that is expected to succeed.
 fn docker_lines(args: &[&str]) -> Vec<String> {
-    let output = Command::new("docker").args(args).output().expect("run docker");
+    let output = Command::new("docker")
+        .args(args)
+        .output()
+        .expect("run docker");
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|line| line.trim().to_string())
@@ -137,7 +140,14 @@ fn a_compose_service_that_publishes_a_port_starts() {
         "version = 1\n\n[[services]]\nid = \"app\"\ncompose = { file = \"compose.yaml\", service = \"app\" }\nport = { target = 8080 }\n",
     );
     fixture.git_repo();
-    let added = fixture.git(&["worktree", "add", "-q", "mtcg-published", "-b", "mtcg-published"]);
+    let added = fixture.git(&[
+        "worktree",
+        "add",
+        "-q",
+        "mtcg-published",
+        "-b",
+        "mtcg-published",
+    ]);
     assert!(added.status.success(), "git worktree add");
     let worktree = fixture.join("mtcg-published");
     let project = Project("mtcg-published".to_string());
@@ -173,7 +183,10 @@ fn gc_reclaims_a_dead_worktrees_container_and_volume() {
     let repo = Repo::open(fixture.path()).expect("repo");
     worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
 
-    assert!(project.containers().is_empty(), "the container is reclaimed");
+    assert!(
+        project.containers().is_empty(),
+        "the container is reclaimed"
+    );
     assert!(project.volumes().is_empty(), "so is its volume");
 }
 

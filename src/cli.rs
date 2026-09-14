@@ -1,3 +1,4 @@
+use crate::banner;
 use crate::bootstrap;
 use crate::compose::{self, ComposeRunner, ContainerState};
 use crate::config::Config;
@@ -14,7 +15,7 @@ use crate::repo::Repo;
 use crate::run;
 use crate::worktrees;
 use anyhow::{anyhow, bail, Result};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
@@ -244,6 +245,20 @@ pub struct EnvArgs {
     pub explain: bool,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+}
+
+/// The command line as it is parsed: the derived `Cli::command` with the banner
+/// printed above its help.
+pub fn command() -> clap::Command {
+    Cli::command().before_help(banner::ART)
+}
+
+/// Parse the command line, printing help or the error the way `Cli::parse` does.
+pub fn parse() -> Cli {
+    match command().try_get_matches() {
+        Ok(matches) => Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit()),
+        Err(err) => err.exit(),
+    }
 }
 
 pub fn dispatch(cli: Cli) -> Result<()> {

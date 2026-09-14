@@ -99,8 +99,8 @@ fn inputs_digest(worktree_root: &Path, inputs: &[String]) -> Result<String> {
             hash_dir(&mut hasher, &path)
                 .with_context(|| format!("hashing bootstrap input '{relative}'"))?;
         } else {
-            let bytes =
-                std::fs::read(&path).with_context(|| format!("reading bootstrap input '{relative}'"))?;
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("reading bootstrap input '{relative}'"))?;
             hasher.update(&bytes);
         }
     }

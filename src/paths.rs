@@ -48,15 +48,15 @@ impl Paths {
 /// external volume while the state dir sits under `$HOME`.
 pub fn move_dir(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
     }
     match std::fs::rename(from, to) {
         Ok(()) => return Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(error) => {
-            return Err(error).with_context(|| {
-                format!("moving {} to {}", from.display(), to.display())
-            })
+            return Err(error)
+                .with_context(|| format!("moving {} to {}", from.display(), to.display()))
         }
     }
     copy_dir(from, to)?;

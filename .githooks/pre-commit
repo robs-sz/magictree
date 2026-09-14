@@ -1,0 +1,16 @@
+#!/bin/sh
+# A commit `cargo fmt` would rewrite never lands: the check runs here rather
+# than in CI, so the tree stays formatted by construction.
+#
+# Hooks are not copied from a clone, so point git at this directory once:
+#   git config core.hooksPath .githooks
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found, skipping the formatting check" >&2
+    exit 0
+fi
+
+if ! cargo fmt --check; then
+    echo "pre-commit: cargo fmt --check failed; run 'cargo fmt' and stage the result" >&2
+    exit 1
+fi

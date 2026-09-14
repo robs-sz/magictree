@@ -152,8 +152,14 @@ fn runtime_with_process(paths: &Paths, linked: &Repo, fixture: &Fixture) -> (Pat
         serde_json::to_string(&assignment).expect("json"),
     )
     .expect("ports.json");
-    let pid = run::start(&runtime, "web", "sleep 300", fixture.path(), &BTreeMap::new())
-        .expect("start");
+    let pid = run::start(
+        &runtime,
+        "web",
+        "sleep 300",
+        fixture.path(),
+        &BTreeMap::new(),
+    )
+    .expect("start");
     (runtime, pid)
 }
 
@@ -217,7 +223,11 @@ fn gc_stops_host_processes_whose_checkout_is_gone() {
     worktrees::gc(&paths, &repo, STOP_TIMEOUT, false).expect("dry run");
     assert!(run::is_alive(pid), "a dry run must not stop the process");
     assert!(runtime.exists(), "a dry run must not drop the state");
-    assert_eq!(block_count(&state), 2, "a dry run must not release the block");
+    assert_eq!(
+        block_count(&state),
+        2,
+        "a dry run must not release the block"
+    );
 
     worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
 
@@ -233,7 +243,11 @@ fn gc_keeps_state_it_cannot_attribute() {
     let (fixture, _worktree, state) = repo_with_wt("ghost");
     let paths = paths(&fixture);
     let repo = Repo::open(fixture.path()).expect("repo");
-    let stray = paths.state_dir.join("worktrees").join(repo.key()).join("mystery");
+    let stray = paths
+        .state_dir
+        .join("worktrees")
+        .join(repo.key())
+        .join("mystery");
     std::fs::create_dir_all(&stray).expect("stray dir");
 
     worktrees::gc(&paths, &repo, STOP_TIMEOUT, true).expect("gc");
@@ -455,7 +469,11 @@ fn a_worktree_named_main_does_not_share_the_primary_block() {
     .expect("linked assignment");
 
     assert_ne!(primary_block.base, linked_block.base);
-    assert_eq!(block_count(&paths.state_dir), 2, "each worktree owns a block");
+    assert_eq!(
+        block_count(&paths.state_dir),
+        2,
+        "each worktree owns a block"
+    );
 
     let rows = worktrees::worktree_rows(&primary, &paths).expect("rows");
     assert_eq!(rows.len(), 1, "only the linked worktree is listed");
