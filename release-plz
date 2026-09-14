@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage="usage: $(basename "$0") patch|minor|major"
+
+bump="${1-}"
+case "$bump" in
+  patch | minor | major) ;;
+  *)
+    echo "$usage" >&2
+    exit 2
+    ;;
+esac
+
+cd "$(dirname "$0")"
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "the working tree is dirty" >&2
+  exit 1
+fi
+
+if [ "$(git rev-parse --abbrev-ref HEAD)" != main ]; then
+  echo "not on main" >&2
+  exit 1
+fi
+
+git fetch --quiet origin main
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  echo "main is not pushed" >&2
+  exit 1
+fi
+
+current="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+IFS=. read -r major minor patch <<<"$current"
+
+case "$bump" in
+  patch) patch=$((patch + 1)) ;;
+  minor)
+    minor=$((minor + 1))
+    patch=0
+    ;;
+  major)
+    major=$((major + 1))
+    minor=0
+    patch=0
+    ;;
+esac
+
+next="$major.$minor.$patch"
+tag="v$next"
+
+if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+  echo "$tag is already tagged" >&2
+  exit 1
+fi
+
+perl -i -pe "if (!\$done && s/^version = \"\Q$current\E\"\$/version = \"$next\"/) { \$done = 1 }" Cargo.toml
+cargo update --workspace --quiet
+
+echo "releasing $tag"
+git add Cargo.toml Cargo.lock
+git commit -m "release $tag"
+git tag -a "$tag" -m "$tag"
+git push origin main
+git push origin "$tag"
