@@ -470,13 +470,34 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
             answer.display()
         );
     }
-    let answers = match &args.answers {
-        Some(path) => discover::AnswerSet::read_json(path)?,
+    for (id, options) in &recorded.reopened {
+        eprintln!(
+            "warning: {id} now offers '{}', which its recorded answer never decided\n\
+             run `magictree init` to be asked about it, or `magictree init --reanswer`",
+            options.join("', '")
+        );
+    }
+    // A question is decided against the options on offer when it is answered, so
+    // only the ones this run answered count as decided: a replayed answer keeps
+    // what it turned down before, which is what leaves a newly offered option
+    // open for the next run to ask about.
+    let (answers, asked) = match &args.answers {
+        Some(path) => {
+            let from_file = discover::AnswerSet::read_json(path)?;
+            let asked = from_file.answers.keys().cloned().collect();
+            (from_file, asked)
+        }
         None if args.accept_defaults => {
             let mut answers = init::default_answers(&report);
             for (id, answer) in &recorded.answers {
                 answers.answers.insert(id.clone(), answer.clone());
             }
+            let asked = answers
+                .answers
+                .keys()
+                .filter(|id| !recorded.answers.contains_key(*id))
+                .cloned()
+                .collect();
             if !recorded.answers.is_empty() {
                 println!(
                     "keeping {} answer(s) recorded in {}",
@@ -484,14 +505,18 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
                     manifest.display()
                 );
             }
-            answers
+            (answers, asked)
         }
-        None => init::wizard::run(&report, &recorded.answers, &manifest.display().to_string())?,
+        None => {
+            let session = init::wizard::run(&report, &recorded, &manifest.display().to_string())?;
+            (session.answers, session.asked)
+        }
     };
+    let record = init::record(&report, &answers, &recorded, &asked);
     if let Some(path) = &args.save_answers {
         answers.write(path)?;
     }
-    let planned = init::plan(&report, &answers, &root)?;
+    let planned = init::plan(&report, &answers, &record, &root)?;
     for warning in init::warnings(&report, &answers) {
         eprintln!("warning: {warning}");
     }
@@ -524,7 +549,12 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
                     changes.push("recorded the answers".to_string());
                 }
                 println!("updated {}: {}", path.display(), changes.join(", "));
-                if let Some(changed) = recorded.filter(|changed| !changed.is_empty()) {
+                // A changed answer that also added a service did take effect, so
+                // the note that says an existing service was left alone would
+                // only confuse.
+                if let Some(changed) =
+                    recorded.filter(|changed| !changed.is_empty() && added.is_empty())
+                {
                     eprintln!(
                         "warning: the answer for '{}' changed; the services already in {} keep what they declare\n\
                          re-run with `magictree init --force` to rewrite them",

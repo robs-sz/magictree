@@ -4,9 +4,18 @@ mod support;
 
 use magictree::discover::report::{Answer, AnswerSet, REPORT_VERSION};
 use magictree::discover::{extract, Report};
-use magictree::init::{apply, default_answers, plan, warnings, Applied};
-use std::collections::BTreeMap;
+use magictree::init::{apply, default_answers, record, warnings, Applied, Generated, Recorded};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use support::Fixture;
+
+/// `init::plan` with the record a run with no history behind it writes: every
+/// question decided against the options on offer now.
+fn plan(report: &Report, answers: &AnswerSet, root: &Path) -> anyhow::Result<Vec<Generated>> {
+    let asked: BTreeSet<String> = answers.answers.keys().cloned().collect();
+    let record = record(report, answers, &Recorded::default(), &asked);
+    magictree::init::plan(report, answers, &record, root)
+}
 
 fn answers_for(report: &Report) -> AnswerSet {
     default_answers(report)
@@ -410,6 +419,99 @@ port = {{ env = "PORT" }}
         "the replaced line leaves nothing behind:\n{manifest}"
     );
     assert_eq!(manifest.matches("[[services]]").count(), 2, "{manifest}");
+}
+
+#[test]
+fn a_service_added_to_the_compose_file_reopens_the_question_that_manages_it() {
+    // The case the record exists for: someone adds a service to the compose
+    // file after onboarding. Its answer was given against the services of that
+    // day, so the new one is undecided rather than declined.
+    let fixture = compose_app();
+    let report = extract(fixture.path()).expect("extract");
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+    apply(&planned, false).expect("first write");
+
+    // The record carries what the answer turned down, so it can tell that the
+    // new service was never decided.
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        manifest.contains("declined = { \"compose.expose\" = [\"postgres\"] }"),
+        "what the answer passed over is recorded:\n{manifest}"
+    );
+
+    fixture.write(
+        "compose.yaml",
+        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n  jaeger:\n    image: jaegertracing/all-in-one\n",
+    );
+    let report = extract(fixture.path()).expect("extract");
+    let recorded = magictree::init::recorded(fixture.path(), &report).expect("recorded");
+
+    assert_eq!(
+        recorded.reopened.get("compose.shared"),
+        Some(&vec!["jaeger".to_string()]),
+        "the new service reopens the question that decides it"
+    );
+    assert!(
+        !recorded.settled("compose.shared"),
+        "and the question is no longer settled"
+    );
+
+    // Running again with the recorded answers keeps them and leaves the new
+    // service undecided — it is not quietly marked as declined.
+    let mut answers = answers_for(&report);
+    for (id, answer) in &recorded.answers {
+        answers.answers.insert(id.clone(), answer.clone());
+    }
+    let asked: BTreeSet<String> = answers
+        .answers
+        .keys()
+        .filter(|id| !recorded.answers.contains_key(*id))
+        .cloned()
+        .collect();
+    let stored = record(&report, &answers, &recorded, &asked);
+    let planned = magictree::init::plan(&report, &answers, &stored, fixture.path()).expect("plan");
+    let manifest = planned
+        .iter()
+        .find(|file| file.path == fixture.join("magictree.toml"))
+        .expect("the app manifest")
+        .contents();
+    assert!(
+        !manifest.contains("jaeger"),
+        "nothing decides the new service yet:\n{manifest}"
+    );
+    assert_eq!(
+        stored.declined.get("compose.shared"),
+        None,
+        "a question that was not answered again decides nothing new"
+    );
+
+    // Asking it again with everything on offer makes `jaeger` shared.
+    let answered: BTreeSet<String> = report.unknowns.iter().map(|u| u.id.clone()).collect();
+    let stored = record(&report, &answers_for(&report), &recorded, &answered);
+    let answers = answers_for(&report);
+    let planned = magictree::init::plan(&report, &answers, &stored, fixture.path()).expect("plan");
+    let manifest = planned
+        .iter()
+        .find(|file| file.path == fixture.join("magictree.toml"))
+        .expect("the app manifest")
+        .contents();
+    assert!(manifest.contains("id = \"jaeger\""), "{manifest}");
+}
+
+/// A single app with a compose file it manages.
+fn compose_app() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "compose.yaml",
+        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n",
+    );
+    fixture.write(
+        "package.json",
+        r#"{"name":"solo","packageManager":"pnpm@9","scripts":{"dev":"vite dev"}}"#,
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.git_repo();
+    fixture
 }
 
 #[test]

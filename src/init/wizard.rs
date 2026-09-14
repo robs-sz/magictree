@@ -7,8 +7,9 @@
 use crate::discover::report::{
     Answer, AnswerSet, Report, Scope, Unknown, UnknownKind, ANSWERS_VERSION,
 };
+use crate::init::Recorded;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, IsTerminal, Write};
 
 /// Interpret one line of input for one question. Pure, so it can be tested
@@ -87,39 +88,60 @@ fn resolve_option(options: &[String], token: &str) -> Option<String> {
         .cloned()
 }
 
+/// What the wizard was told, and which questions it had to ask for it.
+#[derive(Debug)]
+pub struct Session {
+    pub answers: AnswerSet,
+    /// The questions asked this run. Their answers were given against the
+    /// options on offer now, so they decide all of them.
+    pub asked: BTreeSet<String>,
+}
+
 /// Ask the questions that have no answer yet, in report order.
 ///
 /// `recorded` holds what an earlier run answered, which is where the manifest
 /// records it. Those questions are not asked again unless the caller changes
-/// them, so a repository that gains one service does not re-interview the whole
-/// stack.
+/// them, or unless the question now offers something the answer never decided —
+/// a compose service someone added, an app that appeared. Those are marked, so
+/// it is obvious what is new.
 pub fn prompt(
     report: &Report,
-    recorded: &BTreeMap<String, Answer>,
+    recorded: &Recorded,
     recorded_in: &str,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
-) -> Result<AnswerSet> {
-    let mut answers: BTreeMap<String, Answer> = recorded.clone();
+) -> Result<Session> {
+    let mut answers: BTreeMap<String, Answer> = recorded.answers.clone();
+    let mut asked: BTreeSet<String> = BTreeSet::new();
     let mut questions: Vec<Unknown> = Vec::new();
+    let settled = report
+        .unknowns
+        .iter()
+        .filter(|unknown| recorded.settled(&unknown.id))
+        .count();
 
-    if recorded.is_empty() {
-        questions.extend(report.unknowns.iter().cloned());
-    } else if change_recorded(recorded.len(), recorded_in, input, output)? {
-        // Everything is asked again, with what was recorded as the default.
+    let ask_all = if settled == 0 {
+        // Nothing was kept, so there is nothing to change: every question is one
+        // that has to be asked.
+        true
+    } else {
+        change_recorded(settled, recorded_in, input, output)?
+    };
+
+    if ask_all {
         questions.extend(
             report
                 .unknowns
                 .iter()
-                .map(|unknown| unknown.with_recorded(recorded.get(&unknown.id))),
+                .map(|unknown| unknown.with_recorded(recorded.answers.get(&unknown.id))),
         );
     } else {
         questions.extend(
             report
                 .unknowns
                 .iter()
-                .filter(|unknown| !recorded.contains_key(&unknown.id))
-                .cloned(),
+                .filter(|unknown| !recorded.settled(&unknown.id))
+                .map(|unknown| unknown.with_recorded(recorded.answers.get(&unknown.id))),
         );
     }
 
@@ -129,6 +151,7 @@ pub fn prompt(
             Scope::App { app } => format!("app {app}"),
         };
         writeln!(output, "\n[{scope}] {}", unknown.question)?;
+        let new_options = recorded.reopened.get(&unknown.id);
         for (index, option) in unknown.options.iter().enumerate() {
             let marker = match (&unknown.default, unknown.kind) {
                 (Some(default), UnknownKind::Choice) if default == option => " (default)",
@@ -139,7 +162,13 @@ pub fn prompt(
                 }
                 _ => "",
             };
-            writeln!(output, "  {}. {option}{marker}", index + 1)?;
+            // An option the answer never decided is the reason this question is
+            // being asked again, so it says so.
+            let new = match new_options {
+                Some(options) if options.contains(option) => " (new)",
+                _ => "",
+            };
+            writeln!(output, "  {}. {option}{marker}{new}", index + 1)?;
         }
         if unknown.kind == UnknownKind::MultiChoice {
             writeln!(output, "  enter a comma-separated list, or 'all' / 'none'")?;
@@ -151,10 +180,8 @@ pub fn prompt(
         if input.read_line(&mut line)? == 0 {
             bail!("input ended before every question was answered");
         }
-        match parse_answer(unknown, &line) {
-            Ok(answer) => {
-                answers.insert(unknown.id.clone(), answer);
-            }
+        let answer = match parse_answer(unknown, &line) {
+            Ok(answer) => answer,
             Err(error) => {
                 writeln!(output, "{error}")?;
                 // Ask again rather than aborting a long session on a typo.
@@ -164,15 +191,20 @@ pub fn prompt(
                 if input.read_line(&mut retry)? == 0 {
                     bail!("input ended before every question was answered");
                 }
-                answers.insert(unknown.id.clone(), parse_answer(unknown, &retry)?);
+                parse_answer(unknown, &retry)?
             }
-        }
+        };
+        asked.insert(unknown.id.clone());
+        answers.insert(unknown.id.clone(), answer);
     }
 
-    Ok(AnswerSet {
-        answers_version: ANSWERS_VERSION,
-        report_hash: report.report_hash.clone(),
-        answers,
+    Ok(Session {
+        answers: AnswerSet {
+            answers_version: ANSWERS_VERSION,
+            report_hash: report.report_hash.clone(),
+            answers,
+        },
+        asked,
     })
 }
 
@@ -201,11 +233,7 @@ fn change_recorded(
 }
 
 /// Run the wizard on the real terminal.
-pub fn run(
-    report: &Report,
-    recorded: &BTreeMap<String, Answer>,
-    recorded_in: &str,
-) -> Result<AnswerSet> {
+pub fn run(report: &Report, recorded: &Recorded, recorded_in: &str) -> Result<Session> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "stdin is not a terminal, so the wizard cannot ask anything\n\
@@ -338,24 +366,29 @@ mod tests {
         ]);
         let mut input = std::io::Cursor::new(b"b\n1\n".to_vec());
         let mut output = Vec::new();
-        let answers = prompt(
+        let session = prompt(
             &report,
-            &BTreeMap::new(),
+            &Recorded::default(),
             "magictree.toml",
             &mut input,
             &mut output,
         )
         .unwrap();
 
-        assert_eq!(answers.report_hash, "sha256:x");
+        assert_eq!(session.answers.report_hash, "sha256:x");
         assert!(matches!(
-            answers.answers.get("members"),
+            session.answers.answers.get("members"),
             Some(Answer::Many(values)) if values == &vec!["b".to_string()]
         ));
         assert!(matches!(
-            answers.answers.get("run"),
+            session.answers.answers.get("run"),
             Some(Answer::One(value)) if value == "x"
         ));
+        assert_eq!(
+            session.asked.len(),
+            2,
+            "both questions were answered against today's options"
+        );
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("workspace"), "{rendered}");
     }
@@ -371,13 +404,12 @@ mod tests {
                 Some("sb"),
             ),
         ]);
-        let mut recorded = BTreeMap::new();
-        recorded.insert("run".to_string(), Answer::One("x".to_string()));
+        let recorded = recorded_with(&[("run", "x")]);
 
         // "n" keeps them, and only `storybook` is asked.
         let mut input = std::io::Cursor::new(b"n\n2\n".to_vec());
         let mut output = Vec::new();
-        let answers = prompt(
+        let session = prompt(
             &report,
             &recorded,
             "/tmp/magictree.toml",
@@ -387,13 +419,18 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            answers.answers.get("run"),
+            session.answers.answers.get("run"),
             Some(Answer::One(value)) if value == "x"
         ));
         assert!(matches!(
-            answers.answers.get("storybook"),
+            session.answers.answers.get("storybook"),
             Some(Answer::One(value)) if value == "skip"
         ));
+        assert_eq!(
+            session.asked.iter().collect::<Vec<_>>(),
+            vec!["storybook"],
+            "the kept answer was not answered again"
+        );
         let rendered = String::from_utf8_lossy(&output);
         assert!(
             rendered.contains("1 question(s) are already answered in /tmp/magictree.toml"),
@@ -407,6 +444,50 @@ mod tests {
     }
 
     #[test]
+    fn a_question_that_grew_is_asked_again_and_says_what_is_new() {
+        let report = test_report(vec![named(
+            "compose.shared",
+            UnknownKind::MultiChoice,
+            &["postgres", "redis", "mailpit"],
+            Some("postgres,redis,mailpit"),
+        )]);
+        let recorded = Recorded {
+            answers: BTreeMap::from([(
+                "compose.shared".to_string(),
+                Answer::Many(vec!["postgres".to_string(), "redis".to_string()]),
+            )]),
+            reopened: BTreeMap::from([("compose.shared".to_string(), vec!["mailpit".to_string()])]),
+            ..Recorded::default()
+        };
+
+        let mut input = std::io::Cursor::new(b"\n".to_vec());
+        let mut output = Vec::new();
+        let session = prompt(
+            &report,
+            &recorded,
+            "magictree.toml",
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(
+            rendered.contains("3. mailpit (new)"),
+            "the option the answer never decided is marked: {rendered}"
+        );
+        assert!(
+            rendered.contains("1. postgres (default)"),
+            "what was chosen is the default: {rendered}"
+        );
+        assert_eq!(
+            session.asked.iter().collect::<Vec<_>>(),
+            vec!["compose.shared"],
+            "a question that grew is asked again"
+        );
+    }
+
+    #[test]
     fn changing_recorded_answers_asks_them_again_with_what_was_chosen() {
         let report = test_report(vec![named(
             "run",
@@ -414,14 +495,13 @@ mod tests {
             &["x", "y"],
             Some("y"),
         )]);
-        let mut recorded = BTreeMap::new();
-        recorded.insert("run".to_string(), Answer::One("x".to_string()));
+        let recorded = recorded_with(&[("run", "x")]);
 
         // "y" asks everything, and the recorded answer is the default, so a bare
         // enter keeps it and a different option changes it.
         let mut input = std::io::Cursor::new(b"y\n\n".to_vec());
         let mut output = Vec::new();
-        let answers = prompt(
+        let session = prompt(
             &report,
             &recorded,
             "magictree.toml",
@@ -431,11 +511,22 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            answers.answers.get("run"),
+            session.answers.answers.get("run"),
             Some(Answer::One(value)) if value == "x"
         ));
         let rendered = String::from_utf8_lossy(&output);
         assert!(rendered.contains("1. x (default)"), "{rendered}");
+    }
+
+    /// A recorded answer for the simple questions these tests use.
+    fn recorded_with(pairs: &[(&str, &str)]) -> Recorded {
+        Recorded {
+            answers: pairs
+                .iter()
+                .map(|(id, value)| (id.to_string(), Answer::One(value.to_string())))
+                .collect(),
+            ..Recorded::default()
+        }
     }
 
     fn test_report(unknowns: Vec<Unknown>) -> Report {

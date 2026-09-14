@@ -31,8 +31,8 @@ pub struct Generated {
     /// The answers this manifest records, so a later run asks only about what
     /// the repository has since added. Empty for every manifest but the one at
     /// the repository root, which is where `init` was told to work.
-    pub answers: BTreeMap<String, Answer>,
-    /// True for the manifest that carries `answers`.
+    pub stored: Stored,
+    /// True for the manifest that carries the record.
     pub records_answers: bool,
 }
 
@@ -87,7 +87,12 @@ impl Applied {
 }
 
 /// Build every manifest the report and answers imply.
-pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Vec<Generated>> {
+pub fn plan(
+    report: &Report,
+    answers: &AnswerSet,
+    record: &Stored,
+    repo_root: &Path,
+) -> Result<Vec<Generated>> {
     if answers.answers_version != ANSWERS_VERSION {
         bail!(
             "answers version {} is not supported (expected {ANSWERS_VERSION})",
@@ -119,9 +124,9 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
     let members = resolve_members(report, answers)?;
     let shared = answer_list(answers, "compose.shared")?;
     let exposed = answer_list(answers, "compose.expose")?;
-    // The answers are recorded in the manifest at the repository root, so the
-    // next run can ask only about what the repository has since gained.
-    let recorded = answers.answers.clone();
+    // The record lives in the manifest at the repository root, so the next run
+    // can ask only about what the repository has since gained.
+    let stored = record.clone();
 
     let mut generated = Vec::new();
 
@@ -132,7 +137,7 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
     let workspace_layer = report.apps.len() > 1 || (manage_compose && !single_app_at_root);
 
     if workspace_layer {
-        let mut out = manifest_head(Some(&recorded));
+        let mut out = manifest_head(Some(&stored));
         out.push_str("\n[workspace]\napps = [");
         for (index, dir) in members.iter().enumerate() {
             if index > 0 {
@@ -145,7 +150,7 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             path: repo_root.join("magictree.toml"),
             header: out,
             services: compose_services(&compose, report, &shared, &exposed)?,
-            answers: recorded.clone(),
+            stored: stored.clone(),
             records_answers: true,
         });
     }
@@ -161,7 +166,7 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             repo_root.join(&app.dir)
         };
         let shares_root_manifest = app.dir == ".";
-        let mut out = manifest_head(shares_root_manifest.then_some(&recorded));
+        let mut out = manifest_head(shares_root_manifest.then_some(&stored));
         out.push_str("\n[app]\n");
         let _ = writeln!(out, "id = \"{}\"", app.id);
         let mut services: Vec<ServiceBlock> = Vec::new();
@@ -274,10 +279,10 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             path: app_root.join("magictree.toml"),
             header: out,
             services,
-            answers: if shares_root_manifest {
-                recorded.clone()
+            stored: if shares_root_manifest {
+                stored.clone()
             } else {
-                BTreeMap::new()
+                Stored::default()
             },
             records_answers: shares_root_manifest,
         });
@@ -343,43 +348,126 @@ fn storybook_target(kind: &str, script: &str) -> Result<String> {
     Ok(out)
 }
 
-/// The comment that explains the recorded answers, and the key they sit under.
+/// The comment that explains the recorded answers, and the keys they sit under.
 const ANSWERS_COMMENT: &str =
     "# Recorded by `magictree init`; replayed so only new questions are asked.\n";
 const ANSWERS_KEY: &str = "answers";
+const DECLINED_KEY: &str = "declined";
+
+/// What a manifest records: the answer to each question, and the options those
+/// answers passed over.
+///
+/// The options matter as much as the answers. A question that offers a choice of
+/// several things — which apps are in the stack, which compose services are
+/// shared — is decided one option at a time, so an option that was neither
+/// chosen nor turned down is one nobody has decided yet. Without this, a service
+/// someone added to the compose file would be silently left unmanaged.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Stored {
+    pub answers: BTreeMap<String, Answer>,
+    pub declined: BTreeMap<String, Vec<String>>,
+}
+
+impl Stored {
+    pub fn is_empty(&self) -> bool {
+        self.answers.is_empty()
+    }
+}
+
+/// The options each set question's answer passed over, in this run.
+///
+/// A question that offers several things is answered one option at a time, so
+/// what the answer turned down is as much a part of the answer as what it chose.
+/// A question the previous run already answered keeps what it turned down then:
+/// its answer was given against the options of that day, and an option that has
+/// appeared since is one nobody has decided — which is exactly what reopens the
+/// question. Recomputing it here would quietly mark the new option as declined
+/// and leave it out of the manifest for good.
+pub fn record(
+    report: &Report,
+    answers: &AnswerSet,
+    recorded: &Recorded,
+    asked: &BTreeSet<String>,
+) -> Stored {
+    let mut declined = BTreeMap::new();
+    for unknown in &report.unknowns {
+        if unknown.kind != UnknownKind::MultiChoice {
+            continue;
+        }
+        let Some(answer) = answers.answers.get(&unknown.id) else {
+            continue;
+        };
+        let passed_over: Vec<String> = if asked.contains(&unknown.id) {
+            let chosen = answer.as_many();
+            unknown
+                .options
+                .iter()
+                .filter(|option| !chosen.contains(option))
+                .cloned()
+                .collect()
+        } else {
+            recorded
+                .declined
+                .get(&unknown.id)
+                .cloned()
+                .unwrap_or_default()
+        };
+        if !passed_over.is_empty() {
+            declined.insert(unknown.id.clone(), passed_over);
+        }
+    }
+    Stored {
+        answers: answers.answers.clone(),
+        declined,
+    }
+}
 
 /// The start of a manifest: `version`, then the answers that produced it.
 ///
 /// The answers have to sit here rather than with the services: a bare key
 /// belongs to the table above it, so anything after `[app]` or `[bootstrap]`
 /// would end up inside that table.
-fn manifest_head(answers: Option<&BTreeMap<String, Answer>>) -> String {
+fn manifest_head(stored: Option<&Stored>) -> String {
     let mut out = String::from("version = 1\n");
-    if let Some(section) = answers.and_then(answers_section) {
+    if let Some(section) = stored.and_then(answers_section) {
         out.push('\n');
         out.push_str(&section);
     }
     out
 }
 
-/// The answers as one line of TOML, with the comment that explains it. `None`
-/// when there is nothing to record.
+/// The answers as TOML, with the comment that explains them. `None` when there
+/// is nothing to record.
 ///
-/// One line, because an existing manifest is updated by replacing it: the
-/// answers are `init`'s own record, and nothing else reads them.
-fn answers_section(answers: &BTreeMap<String, Answer>) -> Option<String> {
-    if answers.is_empty() {
+/// One line each, because an existing manifest is updated by replacing them: the
+/// record is `init`'s own, and nothing else reads it.
+fn answers_section(stored: &Stored) -> Option<String> {
+    if stored.is_empty() {
         return None;
     }
     let mut out = String::from(ANSWERS_COMMENT);
     let _ = write!(out, "{ANSWERS_KEY} = {{");
-    for (index, (id, answer)) in answers.iter().enumerate() {
+    for (index, (id, answer)) in stored.answers.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
         let _ = write!(out, " \"{}\" = {}", escape_toml(id), answer_literal(answer));
     }
     out.push_str(" }\n");
+    if !stored.declined.is_empty() {
+        let _ = write!(out, "{DECLINED_KEY} = {{");
+        for (index, (id, options)) in stored.declined.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let quoted: Vec<String> = options
+                .iter()
+                .map(|option| format!("\"{}\"", escape_toml(option)))
+                .collect();
+            let _ = write!(out, " \"{}\" = [{}]", escape_toml(id), quoted.join(", "));
+        }
+        out.push_str(" }\n");
+    }
     Some(out)
 }
 
@@ -417,33 +505,62 @@ fn answer_from_value(value: &toml::Value) -> Option<Answer> {
 /// The answers a manifest records. Anything that is not the shape
 /// `answers_section` writes is left out, so a hand-written line cannot put words
 /// in `init`'s mouth.
-fn read_answers(contents: &str) -> Result<BTreeMap<String, Answer>> {
+fn read_answers(contents: &str) -> Result<Stored> {
     #[derive(serde::Deserialize)]
     struct Recorded {
         #[serde(default)]
         answers: Option<toml::Value>,
+        #[serde(default)]
+        declined: Option<toml::Value>,
     }
     let recorded: Recorded = toml::from_str(contents).context("reading the recorded answers")?;
-    Ok(recorded
-        .answers
-        .as_ref()
-        .and_then(|value| value.as_table())
-        .map(|table| {
-            table
-                .iter()
-                .filter_map(|(id, value)| Some((id.clone(), answer_from_value(value)?)))
-                .collect()
-        })
-        .unwrap_or_default())
+    let table = |value: &Option<toml::Value>| {
+        value
+            .as_ref()
+            .and_then(|value| value.as_table())
+            .cloned()
+            .unwrap_or_default()
+    };
+    Ok(Stored {
+        answers: table(&recorded.answers)
+            .iter()
+            .filter_map(|(id, value)| Some((id.clone(), answer_from_value(value)?)))
+            .collect(),
+        declined: table(&recorded.declined)
+            .iter()
+            .filter_map(|(id, value)| {
+                let options = value
+                    .as_array()?
+                    .iter()
+                    .map(|option| option.as_str().map(str::to_string))
+                    .collect::<Option<Vec<String>>>()?;
+                Some((id.clone(), options))
+            })
+            .collect(),
+    })
 }
 
-/// What a manifest records, and the answers in it that this report no longer
-/// accepts — a script that was renamed, a service that is gone. The caller asks
-/// about those again rather than replaying them.
+/// What a previous run recorded, sorted into what still answers its question and
+/// what has to be asked again.
 #[derive(Debug, Default)]
 pub struct Recorded {
+    /// Every recorded answer this report still offers.
     pub answers: BTreeMap<String, Answer>,
+    /// The options those answers turned down when they were given, carried
+    /// forward so a replayed question is not re-decided against today's options.
+    pub declined: BTreeMap<String, Vec<String>>,
+    /// The answers whose question now offers options they never decided — a
+    /// compose service someone added, an app that appeared — with those options.
+    pub reopened: BTreeMap<String, Vec<String>>,
+    /// Answers this report no longer offers at all.
     pub dropped: Vec<(String, Answer)>,
+}
+
+impl Recorded {
+    /// True when this question has been answered and nothing about it is new.
+    pub fn settled(&self, id: &str) -> bool {
+        self.answers.contains_key(id) && !self.reopened.contains_key(id)
+    }
 }
 
 /// The answers a previous run recorded in the manifest at `root`.
@@ -454,38 +571,62 @@ pub fn recorded(root: &Path, report: &Report) -> Result<Recorded> {
     }
     let contents =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let mut recorded = Recorded::default();
-    for (id, answer) in read_answers(&contents)? {
-        let accepted = report
-            .unknowns
-            .iter()
-            .find(|unknown| unknown.id == id)
-            .is_some_and(|unknown| unknown.accepts(&answer));
-        if accepted {
-            recorded.answers.insert(id, answer);
-        } else {
+    let stored = read_answers(&contents)?;
+    let mut recorded = Recorded {
+        declined: stored.declined.clone(),
+        ..Recorded::default()
+    };
+    for (id, answer) in stored.answers {
+        let Some(unknown) = report.unknowns.iter().find(|unknown| unknown.id == id) else {
             recorded.dropped.push((id, answer));
+            continue;
+        };
+        if !unknown.accepts(&answer) {
+            recorded.dropped.push((id, answer));
+            continue;
         }
+        // A set question is decided one option at a time, so it is only answered
+        // while it offers nothing new. What it offers now and the answer never
+        // decided is what the caller has to ask about.
+        if unknown.kind == UnknownKind::MultiChoice {
+            let chosen = answer.as_many();
+            let passed_over = stored.declined.get(&id).cloned().unwrap_or_default();
+            let undecided: Vec<String> = unknown
+                .options
+                .iter()
+                .filter(|option| !chosen.contains(option) && !passed_over.contains(option))
+                .cloned()
+                .collect();
+            if !undecided.is_empty() {
+                recorded.reopened.insert(id.clone(), undecided);
+            }
+        }
+        recorded.answers.insert(id, answer);
     }
     Ok(recorded)
 }
 
-/// The manifest with its recorded answers replaced — or added before the first
-/// table, or dropped when there is nothing left to record.
-fn with_answers(contents: &str, answers: &BTreeMap<String, Answer>) -> String {
+/// The manifest with its record replaced — or added before the first table, or
+/// dropped when there is nothing left to record.
+fn with_answers(contents: &str, stored: &Stored) -> String {
     let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
-    let key = lines.iter().position(|line| is_answers_key(line));
+    let key = lines.iter().position(|line| is_record_key(line));
     let start = match key {
-        // The comment belongs to the line it explains, so both go.
+        // The comment belongs to the lines it explains, so it goes with them.
         Some(index) if index > 0 && is_answers_comment(&lines[index - 1]) => Some(index - 1),
         other => other,
     };
-    let section: Vec<String> = answers_section(answers)
+    let section: Vec<String> = answers_section(stored)
         .map(|text| text.lines().map(str::to_string).collect())
         .unwrap_or_default();
     match start {
         Some(start) => {
-            let end = key.map_or(start + 1, |index| index + 1);
+            // Both keys go: the block is replaced as a whole, so a `declined`
+            // that is no longer written cannot be left behind.
+            let mut end = key.map_or(start + 1, |index| index + 1);
+            while lines.get(end).is_some_and(|line| is_record_key(line)) {
+                end += 1;
+            }
             lines.splice(start..end, section);
         }
         // A bare key belongs to the table above it, so it goes above the first.
@@ -503,9 +644,11 @@ fn with_answers(contents: &str, answers: &BTreeMap<String, Answer>) -> String {
     out
 }
 
-fn is_answers_key(line: &str) -> bool {
-    line.strip_prefix(ANSWERS_KEY)
-        .is_some_and(|rest| rest.trim_start().starts_with('='))
+fn is_record_key(line: &str) -> bool {
+    [ANSWERS_KEY, DECLINED_KEY].iter().any(|key| {
+        line.strip_prefix(key)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    })
 }
 
 fn is_answers_comment(line: &str) -> bool {
@@ -570,6 +713,10 @@ fn escape_toml(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// The comment that introduces the compose services a manifest manages.
+const SHARED_SERVICES_COMMENT: &str =
+    "# Shared infrastructure from the repository's compose file.\n";
+
 /// The infrastructure services that belong to the manifest that owns them.
 fn compose_services(
     compose: &[ComposeServiceFact],
@@ -585,7 +732,8 @@ fn compose_services(
             .with_context(|| format!("no compose service named '{name}' in the report"))?;
         let mut out = String::new();
         if blocks.is_empty() {
-            out.push_str("# Shared infrastructure from the repository's compose file.\n\n");
+            out.push_str(SHARED_SERVICES_COMMENT);
+            out.push('\n');
         }
         out.push_str("[[services]]\n");
         let _ = writeln!(out, "id = \"{name}\"");
@@ -697,21 +845,23 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
             .with_context(|| format!("reading {}", file.path.display()))?;
         let declared = crate::manifest::parse_str(&existing)
             .with_context(|| format!("reading the services of {}", file.path.display()))?;
-        // The answers are init's own record, so they are brought up to date even
-        // when the manifest needs no new service: a question answered differently
-        // is still worth remembering for the next run.
+        // The record is init's own, so it is brought up to date even when the
+        // manifest needs no new service: a question answered differently is
+        // still worth remembering for the next run.
         let record = file.records_answers;
         let before = if record {
             read_answers(&existing)
                 .with_context(|| format!("reading the answers of {}", file.path.display()))?
         } else {
-            BTreeMap::new()
+            Stored::default()
         };
-        let recorded = (record && before != file.answers).then(|| {
-            file.answers
+        let recorded = (record && before != file.stored).then(|| {
+            file.stored
+                .answers
                 .iter()
                 .filter(|(id, answer)| {
                     before
+                        .answers
                         .get(*id)
                         .is_some_and(|previous| *previous != **answer)
                 })
@@ -740,7 +890,7 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
             continue;
         }
         let mut contents = if recorded.is_some() {
-            with_answers(&existing, &file.answers)
+            with_answers(&existing, &file.stored)
         } else {
             existing
         };
@@ -750,7 +900,7 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
             }
             for service in &missing {
                 contents.push('\n');
-                contents.push_str(&service.text);
+                contents.push_str(without_repeated_comment(&service.text, &contents));
             }
         }
         decided.push((
@@ -763,6 +913,20 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
         ));
     }
     Ok(decided)
+}
+
+/// A block's text without a section comment the manifest already carries.
+///
+/// The comment introduces a group of services, so a manifest that has it must
+/// not gain a second copy when a service joins the group later.
+fn without_repeated_comment<'a>(text: &'a str, existing: &str) -> &'a str {
+    if !existing.contains(SHARED_SERVICES_COMMENT.trim_end()) {
+        return text;
+    }
+    match text.strip_prefix(SHARED_SERVICES_COMMENT) {
+        Some(rest) => rest.trim_start_matches('\n'),
+        None => text,
+    }
 }
 
 /// The step an existing service runs, in the `<runner>:<recipe>` form the run

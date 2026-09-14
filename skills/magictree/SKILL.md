@@ -61,13 +61,15 @@ manage — and prints `added service 'storybook'`. Every other line, comment and
 value stays as written, and a step the manifest already runs is never added a
 second time under the plan's name for it.
 
-`init` records what it was told in the manifest at the repository root, as one
-`answers` line, and replays it: the next run asks only about what the repository
-has since gained, and a question answered `skip` stays skipped. So do not edit
-that line to change an answer — run `magictree init --reanswer`, which asks every
-question again, and keep the manifest as the place where choices live. `init
---force` regenerates the file from the recorded answers, which is how an answer
-that changed reaches a service that was already written.
+`init` records what it was told in the manifest at the repository root — the answers, and the
+options each one turned down — and replays it: the next run asks only about what the
+repository has since gained, and a question answered `skip` stays skipped. A question that
+offers a set of things is decided one option at a time, so when someone adds a compose
+service, `init` reports that its answer never decided it and leaves it undecided rather than
+assuming a no. The next interactive run asks about it, marking the new options. Do not edit
+that line to change an answer: run `magictree init --reanswer`, and keep the manifest as the
+place where choices live. `init --force` regenerates the file from the recorded answers,
+which is how an answer that changed reaches a service that was already written.
 
 **Do not hand-write a manifest when the repository can be discovered.** Run
 `discover`, answer the questions, and let `init` write it. If you do write one by

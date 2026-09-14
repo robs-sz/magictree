@@ -705,6 +705,55 @@ fn init_records_its_answers_and_asks_again_only_from_them() {
 }
 
 #[test]
+fn a_compose_service_added_later_is_reported_rather_than_ignored() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "compose.yaml",
+        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n",
+    );
+    fixture.write(
+        "package.json",
+        r#"{"name":"solo","packageManager":"pnpm@9","scripts":{"dev":"sleep 300"}}"#,
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let first = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(first.ok(), "{}", first.combined());
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(manifest.contains("id = \"redis\""), "{manifest}");
+
+    // Someone adds a service the manifest was never told about.
+    fixture.write(
+        "compose.yaml",
+        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n  jaeger:\n    image: jaegertracing/all-in-one\n",
+    );
+    let second = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(second.ok(), "{}", second.combined());
+    assert!(
+        second.stderr.contains("jaeger") && second.stderr.contains("never decided"),
+        "the new service is reported: {}",
+        second.combined()
+    );
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        !manifest.contains("id = \"jaeger\""),
+        "an unanswered question is not decided for the user:\n{manifest}"
+    );
+
+    // Answering it again takes discovery's default, which manages every service.
+    let reanswered = run(
+        &["init", "--accept-defaults", "--reanswer"],
+        fixture.path(),
+        &state,
+    );
+    assert!(reanswered.ok(), "{}", reanswered.combined());
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(manifest.contains("id = \"jaeger\""), "{manifest}");
+}
+
+#[test]
 fn discover_init_doctor_round_trip() {
     let fixture = Fixture::new();
     fixture.write(
