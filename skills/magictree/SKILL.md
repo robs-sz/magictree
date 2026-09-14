@@ -54,6 +54,14 @@ never guesses: whatever it cannot determine becomes an explicit question.
 answers that were computed from a different report — so re-run `discover` after
 changing the repository, rather than editing an old answer file.
 
+An existing manifest is **added to, not replaced**: `init` appends the service
+blocks the manifest is missing — a Storybook, a compose service the answers now
+manage — and prints `added service 'storybook'`. Every other line, comment and
+value stays as written, and a step the manifest already runs is never added a
+second time under the plan's name for it. `init --force` is the only thing that
+regenerates a file from discovery, discarding local edits, so reach for it only
+when the manifest is one `init` wrote and you want it rewritten.
+
 **Do not hand-write a manifest when the repository can be discovered.** Run
 `discover`, answer the questions, and let `init` write it. If you do write one by
 hand, follow the shape below and run `doctor` afterwards.

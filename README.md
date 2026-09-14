@@ -21,6 +21,14 @@ every worktree created afterwards: `up` there fails with the fix, rather than st
 stack that silently does not exist. Run `discover` and `init` in the primary checkout — the
 one `git worktree list` prints first, and the one `magictree list` never shows.
 
+Onboarding does not end at the first run. Run `discover` and `init` again after the
+repository gains something — a Storybook, a new compose service — and `init` appends the
+service blocks the manifest is missing, leaving every other line, comment and value as it
+was. A step the manifest already runs is not added a second time, whatever the service is
+called there, and `init` says which services it added and which manifests it left alone.
+`--force` regenerates the whole file from discovery instead, which is the only thing that
+discards local edits.
+
 ```sh
 magictree new feat/billing          # git worktree add beside the primary checkout, then up
 magictree new feat/billing --no-up  # create the checkout only

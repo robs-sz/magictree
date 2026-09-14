@@ -565,6 +565,68 @@ health = { tcp = true, timeout = 2 }
 }
 
 #[test]
+fn init_adds_a_service_the_repository_gained_to_an_existing_manifest() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "package.json",
+        r#"{"name":"solo","packageManager":"pnpm@9","scripts":{"dev":"sleep 300"}}"#,
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.write(
+        "magictree.toml",
+        r#"version = 1
+
+# Written before Storybook was in the stack.
+[[services]]
+id = "solo"
+target = { kind = "pnpm", script = "dev" }
+port = { env = "PORT", prefer = 5173 }
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    // The repository gains Storybook after the manifest was written.
+    fixture.write(
+        "package.json",
+        r#"{"name":"solo","packageManager":"pnpm@9","scripts":{"dev":"sleep 300","storybook":"storybook dev -p 6006"},"devDependencies":{"@storybook/react-vite":"8.6.14"}}"#,
+    );
+    fixture.write(".storybook/main.ts", "export default {};\n");
+
+    let init = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(init.ok(), "{}", init.combined());
+    assert!(
+        init.stdout.contains("added service 'storybook'"),
+        "{}",
+        init.combined()
+    );
+
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        manifest.contains("prefer = 5173"),
+        "the manifest keeps its own choices:\n{manifest}"
+    );
+    assert_eq!(
+        manifest.matches("[[services]]").count(),
+        2,
+        "the dev server the manifest already runs is not duplicated:\n{manifest}"
+    );
+
+    let up = run(&["--dry-run", "up"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        up.stdout
+            .contains("pnpm run storybook -p ${STORYBOOK_PORT:-6006} --no-open"),
+        "{}",
+        up.stdout
+    );
+
+    let again = run(&["init", "--accept-defaults"], fixture.path(), &state);
+    assert!(again.ok(), "{}", again.combined());
+    assert!(again.stdout.contains("unchanged"), "{}", again.combined());
+}
+
+#[test]
 fn discover_init_doctor_round_trip() {
     let fixture = Fixture::new();
     fixture.write(

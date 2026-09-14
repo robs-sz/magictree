@@ -15,11 +15,61 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// One manifest to write.
+/// One manifest to write: everything that precedes its first service, then one
+/// block per service.
+///
+/// Kept apart rather than as one string so an existing manifest can be added to
+/// without being rewritten: the blocks an update appends are exactly the ones
+/// the plan would write into a new file.
 #[derive(Debug)]
 pub struct Generated {
     pub path: PathBuf,
-    pub contents: String,
+    /// Everything before the first `[[services]]` table.
+    pub header: String,
+    /// One entry per service, in the order they are written.
+    pub services: Vec<ServiceBlock>,
+}
+
+impl Generated {
+    /// The whole manifest, as written when the file does not exist yet.
+    pub fn contents(&self) -> String {
+        let mut out = self.header.clone();
+        for service in &self.services {
+            out.push('\n');
+            out.push_str(&service.text);
+        }
+        out
+    }
+}
+
+/// One `[[services]]` table, with any comment lines that introduce it.
+#[derive(Debug, Clone)]
+pub struct ServiceBlock {
+    pub id: String,
+    /// The step it starts, in the `<runner>:<script>` form the run answers use.
+    /// `None` for a compose service, which starts a container rather than a step.
+    pub step: Option<String>,
+    pub text: String,
+}
+
+/// What happened to one manifest.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Applied {
+    /// The file did not exist and was written whole.
+    Created(PathBuf),
+    /// The file existed and was missing services, which were appended to it.
+    Updated { path: PathBuf, added: Vec<String> },
+    /// The file existed and already declared every service the answers imply.
+    Unchanged(PathBuf),
+}
+
+impl Applied {
+    pub fn path(&self) -> &Path {
+        match self {
+            Applied::Created(path) | Applied::Unchanged(path) => path,
+            Applied::Updated { path, .. } => path,
+        }
+    }
 }
 
 /// Build every manifest the report and answers imply.
@@ -73,10 +123,10 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             let _ = write!(out, "\"{dir}\"");
         }
         out.push_str("]\n");
-        append_compose_services(&mut out, &compose, report, &shared, &exposed)?;
         generated.push(Generated {
             path: repo_root.join("magictree.toml"),
-            contents: out,
+            header: out,
+            services: compose_services(&compose, report, &shared, &exposed)?,
         });
     }
 
@@ -93,6 +143,7 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
         let shares_root_manifest = app.dir == ".";
         let mut out = String::from("version = 1\n\n[app]\n");
         let _ = writeln!(out, "id = \"{}\"", app.id);
+        let mut services: Vec<ServiceBlock> = Vec::new();
 
         let setup = answers
             .answers
@@ -119,6 +170,8 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             let (kind, rest) = spec
                 .split_once(':')
                 .with_context(|| format!("malformed run answer '{spec}'"))?;
+            let mut block = String::from("[[services]]\n");
+            let _ = writeln!(block, "id = \"{}\"", app.id);
             if kind == "command" {
                 // Running the command directly leaves out whatever the task
                 // runner's recipe prepared, so record what that was. The service
@@ -126,32 +179,35 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
                 if let Some(parameters) = exported_parameters_for(report, &app.id) {
                     if !parameters.is_empty() {
                         let _ = writeln!(
-                            out,
+                            block,
                             "# the recipe this command came from also set: {}",
                             parameters.join(", ")
                         );
-                        out.push_str("# add them under [env] if the service needs them\n");
+                        block.push_str("# add them under [env] if the service needs them\n");
                     }
                 }
             }
-            out.push_str("\n[[services]]\n");
-            let _ = writeln!(out, "id = \"{}\"", app.id);
             if serves_storybook(report, &app.id, spec) {
                 // The app's own server is Storybook: it gets the same port
                 // handling as the dedicated service below, because Storybook
                 // reads no environment variable for it.
-                out.push_str(&storybook_target(kind, rest)?);
+                block.push_str(&storybook_target(kind, rest)?);
             } else {
-                out.push_str(&target_line(kind, rest, spec)?);
+                block.push_str(&target_line(kind, rest, spec)?);
                 let port_variable = answers
                     .answers
                     .get(&format!("{}.port_env", app.id))
                     .and_then(|answer| answer.as_one())
                     .filter(|name| !name.is_empty() && *name != "none")
                     .unwrap_or("PORT");
-                let _ = writeln!(out, "port = {{ env = \"{port_variable}\" }}");
+                let _ = writeln!(block, "port = {{ env = \"{port_variable}\" }}");
             }
-            out.push_str("health = { http = \"/\", timeout = 120 }\n");
+            block.push_str("health = { http = \"/\", timeout = 120 }\n");
+            services.push(ServiceBlock {
+                id: app.id.clone(),
+                step: Some(spec.to_string()),
+                text: block,
+            });
         }
 
         // Storybook runs beside the app rather than instead of it, so it is a
@@ -171,24 +227,32 @@ pub fn plan(report: &Report, answers: &AnswerSet, repo_root: &Path) -> Result<Ve
             } else {
                 "storybook"
             };
+            let mut block = String::new();
             if let Some(comment) = storybook_mcp_comment(report, &app.id) {
-                out.push_str(comment);
+                block.push_str(comment);
+                block.push('\n');
             }
-            out.push_str("\n[[services]]\n");
-            let _ = writeln!(out, "id = \"{id}\"");
-            out.push_str(&storybook_target(kind, rest)?);
-            out.push_str("health = { http = \"/\", timeout = 120 }\n");
+            block.push_str("[[services]]\n");
+            let _ = writeln!(block, "id = \"{id}\"");
+            block.push_str(&storybook_target(kind, rest)?);
+            block.push_str("health = { http = \"/\", timeout = 120 }\n");
+            services.push(ServiceBlock {
+                id: id.to_string(),
+                step: Some(spec.to_string()),
+                text: block,
+            });
         }
 
         if !workspace_layer {
             // A single app at the repository root owns the compose services too.
-            append_compose_services(&mut out, &compose, report, &shared, &exposed)?;
+            services.extend(compose_services(&compose, report, &shared, &exposed)?);
         }
         let _ = shares_root_manifest;
 
         generated.push(Generated {
             path: app_root.join("magictree.toml"),
-            contents: out,
+            header: out,
+            services,
         });
     }
 
@@ -214,7 +278,7 @@ fn storybook_mcp_comment(report: &Report, app: &str) -> Option<&'static str> {
     if !report.storybook_has_mcp(app) {
         return None;
     }
-    Some("\n# @storybook/addon-mcp answers MCP at /mcp on this service\n")
+    Some("# @storybook/addon-mcp answers MCP at /mcp on this service\n")
 }
 
 /// The target and port for a service that serves Storybook.
@@ -310,24 +374,24 @@ fn escape_toml(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Append infrastructure services to the manifest that owns them.
-fn append_compose_services(
-    out: &mut String,
+/// The infrastructure services that belong to the manifest that owns them.
+fn compose_services(
     compose: &[ComposeServiceFact],
     report: &Report,
     shared: &[String],
     exposed: &[String],
-) -> Result<()> {
-    if shared.is_empty() {
-        return Ok(());
-    }
-    out.push_str("\n# Shared infrastructure from the repository's compose file.\n");
+) -> Result<Vec<ServiceBlock>> {
+    let mut blocks = Vec::new();
     for name in shared {
         let fact = compose
             .iter()
             .find(|service| service.name == *name)
             .with_context(|| format!("no compose service named '{name}' in the report"))?;
-        out.push_str("\n[[services]]\n");
+        let mut out = String::new();
+        if blocks.is_empty() {
+            out.push_str("# Shared infrastructure from the repository's compose file.\n\n");
+        }
+        out.push_str("[[services]]\n");
         let _ = writeln!(out, "id = \"{name}\"");
         out.push_str("runtime = \"compose\"\n");
         let file = compose_file_for(report, fact);
@@ -389,30 +453,116 @@ fn append_compose_services(
         if is_initializer(name) {
             out.push_str("wait = \"exit\"\n");
         }
+        blocks.push(ServiceBlock {
+            id: name.clone(),
+            step: None,
+            text: out,
+        });
     }
-    Ok(())
+    Ok(blocks)
 }
 
-/// Write the planned manifests. Existing files are reported, never overwritten
-/// unless `force` is set.
-pub fn apply(planned: &[Generated], force: bool) -> Result<Vec<PathBuf>> {
-    let mut written = Vec::new();
-    for file in planned {
-        if file.path.exists() && !force {
-            bail!(
-                "{} already exists; pass --force to overwrite",
-                file.path.display()
-            );
-        }
-        if let Some(parent) = file.path.parent() {
+/// Write the planned manifests.
+///
+/// A file that does not exist is written whole. One that does is added to: the
+/// services the answers imply and the file does not declare are appended, and
+/// every other line, comment and value is left as it is. `force` regenerates
+/// the whole file from discovery instead, which discards local edits.
+///
+/// Every file is decided before any of them is written, so a manifest that
+/// cannot be read leaves the run without half of it applied.
+pub fn apply(planned: &[Generated], force: bool) -> Result<Vec<Applied>> {
+    let decided = decide(planned, force)?;
+    for (applied, contents) in &decided {
+        let path = applied.path();
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(&file.path, &file.contents)
-            .with_context(|| format!("writing {}", file.path.display()))?;
-        written.push(file.path.clone());
+        std::fs::write(path, contents).with_context(|| format!("writing {}", path.display()))?;
     }
-    Ok(written)
+    Ok(decided.into_iter().map(|(applied, _)| applied).collect())
+}
+
+/// What every manifest would become, without writing anything: the outcome for
+/// each file, and the whole file that outcome leaves behind.
+pub fn preview(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> {
+    decide(planned, force)
+}
+
+fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> {
+    let mut decided = Vec::new();
+    for file in planned {
+        if force || !file.path.exists() {
+            decided.push((Applied::Created(file.path.clone()), file.contents()));
+            continue;
+        }
+        let existing = std::fs::read_to_string(&file.path)
+            .with_context(|| format!("reading {}", file.path.display()))?;
+        let declared = crate::manifest::parse_str(&existing)
+            .with_context(|| format!("reading the services of {}", file.path.display()))?;
+        // A manifest may declare a step under a name of its own — the app's
+        // service renamed, or its app id chosen over the derived one. The step
+        // is what must not run twice, so a service the manifest already runs is
+        // not added again.
+        let declared_steps: BTreeSet<String> =
+            declared.services.iter().filter_map(declared_step).collect();
+        let missing: Vec<&ServiceBlock> = file
+            .services
+            .iter()
+            .filter(|service| !declared.services.iter().any(|known| known.id == service.id))
+            .filter(|service| {
+                !service
+                    .step
+                    .as_ref()
+                    .is_some_and(|step| declared_steps.contains(step))
+            })
+            .collect();
+        if missing.is_empty() {
+            decided.push((Applied::Unchanged(file.path.clone()), existing));
+            continue;
+        }
+        let mut contents = existing;
+        if !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        for service in &missing {
+            contents.push('\n');
+            contents.push_str(&service.text);
+        }
+        decided.push((
+            Applied::Updated {
+                path: file.path.clone(),
+                added: missing.iter().map(|service| service.id.clone()).collect(),
+            },
+            contents,
+        ));
+    }
+    Ok(decided)
+}
+
+/// The step an existing service runs, in the `<runner>:<recipe>` form the run
+/// answers use, when the service declares a target discovery could have offered.
+/// `None` for a compose service or a hand-written command.
+fn declared_step(service: &crate::manifest::Service) -> Option<String> {
+    use crate::manifest::Target;
+    match service.target.as_ref()? {
+        Target::Npm { script, .. } => Some(format!("npm:{script}")),
+        Target::Pnpm { script, .. } => Some(format!("pnpm:{script}")),
+        Target::Just { recipe, .. } => Some(format!("just:{recipe}")),
+        Target::Mise { task, .. } => Some(format!("mise:{task}")),
+        Target::Uv {
+            script: Some(script),
+            ..
+        } => Some(format!("uv:{script}")),
+        // yarn and bun are written as commands, because neither has a target.
+        Target::Command { command } => ["yarn", "bun"].iter().find_map(|runner| {
+            let rest = command.strip_prefix(&format!("{runner} run "))?;
+            let script = rest.split_whitespace().next()?;
+            Some(format!("{runner}:{script}"))
+        }),
+        _ => None,
+    }
 }
 
 /// Hazards the generated manifest cannot repair on its own: a step the run

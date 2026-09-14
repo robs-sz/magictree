@@ -4,7 +4,7 @@ mod support;
 
 use magictree::discover::report::{Answer, AnswerSet, REPORT_VERSION};
 use magictree::discover::{extract, Report};
-use magictree::init::{apply, default_answers, plan, warnings};
+use magictree::init::{apply, default_answers, plan, warnings, Applied};
 use std::collections::BTreeMap;
 use support::Fixture;
 
@@ -45,7 +45,11 @@ fn same_report_and_answers_produce_identical_files() {
     assert_eq!(first.len(), second.len());
     for (left, right) in first.iter().zip(second.iter()) {
         assert_eq!(left.path, right.path);
-        assert_eq!(left.contents, right.contents, "init must be deterministic");
+        assert_eq!(
+            left.contents(),
+            right.contents(),
+            "init must be deterministic"
+        );
     }
 }
 
@@ -106,30 +110,27 @@ fn generates_a_workspace_manifest_and_one_manifest_per_app() {
 
     let workspace = planned
         .iter()
-        .find(|file| file.path.ends_with("magictree.toml") && !file.contents.contains("[app]"))
-        .expect("workspace manifest");
-    assert!(workspace.contents.contains("[workspace]"));
-    assert!(workspace
-        .contents
-        .contains("apps = [\"apps/api\", \"apps/web\"]"));
+        .find(|file| file.path.ends_with("magictree.toml") && !file.contents().contains("[app]"))
+        .expect("workspace manifest")
+        .contents();
+    assert!(workspace.contains("[workspace]"));
+    assert!(workspace.contains("apps = [\"apps/api\", \"apps/web\"]"));
     // Shared infrastructure is declared once, at the workspace level, and is not
     // published to the host.
-    assert!(workspace.contents.contains("id = \"postgres\""));
-    assert!(workspace.contents.contains("expose = \"none\""));
+    assert!(workspace.contains("id = \"postgres\""));
+    assert!(workspace.contains("expose = \"none\""));
 
     let web = planned
         .iter()
         .find(|file| file.path.ends_with("apps/web/magictree.toml"))
-        .expect("web manifest");
-    assert!(web.contents.contains("kind = \"pnpm\", script = \"dev\""));
+        .expect("web manifest")
+        .contents();
+    assert!(web.contains("kind = \"pnpm\", script = \"dev\""));
     assert!(
-        !web.contents.contains("needs"),
-        "shared infrastructure is implicit, so app manifests stay free of boilerplate:\n{}",
-        web.contents
+        !web.contains("needs"),
+        "shared infrastructure is implicit, so app manifests stay free of boilerplate:\n{web}"
     );
-    assert!(web
-        .contents
-        .contains("inputs = [\"pnpm-lock.yaml\", \"package.json\"]"));
+    assert!(web.contains("inputs = [\"pnpm-lock.yaml\", \"package.json\"]"));
 }
 
 #[test]
@@ -154,16 +155,14 @@ fn answers_change_the_output_predictably() {
 
     let workspace = planned
         .iter()
-        .find(|file| file.contents.contains("[workspace]"))
-        .expect("workspace manifest");
+        .find(|file| file.contents().contains("[workspace]"))
+        .expect("workspace manifest")
+        .contents();
     assert!(
-        workspace
-            .contents
-            .contains("port = { target = 5432, env = \"WT_PORT_DB\" }"),
-        "an exposed service keeps a host port and the variable compose derives from:\n{}",
-        workspace.contents
+        workspace.contains("port = { target = 5432, env = \"WT_PORT_DB\" }"),
+        "an exposed service keeps a host port and the variable compose derives from:\n{workspace}"
     );
-    assert!(workspace.contents.contains("apps = [\"apps/web\"]"));
+    assert!(workspace.contains("apps = [\"apps/web\"]"));
 
     assert!(
         !planned
@@ -180,28 +179,119 @@ fn exposes_nothing_by_default_and_keeps_targets_unresolvable() {
     let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
     let workspace = planned
         .iter()
-        .find(|file| file.contents.contains("[workspace]"))
-        .unwrap();
+        .find(|file| file.contents().contains("[workspace]"))
+        .expect("workspace manifest")
+        .contents();
     assert!(
-        !workspace.contents.contains("port = {"),
-        "nothing is published unless asked for:\n{}",
-        workspace.contents
+        !workspace.contains("port = {"),
+        "nothing is published unless asked for:\n{workspace}"
     );
 }
 
 #[test]
-fn apply_refuses_to_overwrite_without_force() {
+fn apply_adds_the_services_an_existing_manifest_lacks() {
+    // The case this exists for: the repository gained a service, and the
+    // manifest already carries choices that regenerating it would discard.
+    let fixture = storybook_app(
+        r#"{"dev":"vite dev","storybook":"storybook dev -p 6006"}"#,
+        "app",
+    );
+    let report = extract(fixture.path()).expect("extract");
+    let derived = report.apps[0].id.clone();
+    fixture.write(
+        "magictree.toml",
+        r#"version = 1
+
+[app]
+id = "design-system"
+
+# Kept as it was written, under a name of its own.
+[[services]]
+id = "web"
+target = { kind = "pnpm", script = "dev" }
+port = { env = "PORT", prefer = 5173 }
+health = { http = "/", timeout = 60 }
+"#,
+    );
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+
+    let applied = apply(&planned, false).expect("update");
+    assert_eq!(
+        applied,
+        vec![Applied::Updated {
+            path: fixture.join("magictree.toml"),
+            added: vec!["storybook".to_string()],
+        }],
+        "the step the manifest already runs is not added a second time"
+    );
+
+    let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
+    assert!(
+        manifest.contains("prefer = 5173") && manifest.contains("# Kept as it was written"),
+        "the update must not rewrite what was there:\n{manifest}"
+    );
+    assert!(
+        manifest.contains("id = \"storybook\"") && manifest.contains("${STORYBOOK_PORT:-6006}"),
+        "the missing service is appended:\n{manifest}"
+    );
+    assert_eq!(
+        manifest.matches("[[services]]").count(),
+        2,
+        "only the missing service is added:\n{manifest}"
+    );
+    assert!(
+        !manifest.contains(&derived),
+        "the plan's name for the app's own service must not appear:\n{manifest}"
+    );
+
+    // A second run has nothing to do, and leaves the file as it is.
+    assert_eq!(
+        apply(&planned, false).expect("second update"),
+        vec![Applied::Unchanged(fixture.join("magictree.toml"))]
+    );
+
+    let loaded = magictree::manifest::Loaded::load(fixture.path()).expect("load updated");
+    loaded.validate().expect("the updated manifest is valid");
+    assert_eq!(loaded.apps[0].manifest.services.len(), 2);
+}
+
+#[test]
+fn apply_regenerates_the_whole_manifest_when_forced() {
     let fixture = monorepo();
     let report = extract(fixture.path()).expect("extract");
     let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
 
-    let written = apply(&planned, false).expect("first write");
-    assert_eq!(written.len(), planned.len());
+    apply(&planned, false).expect("first write");
+    fixture.write(
+        "apps/web/magictree.toml",
+        "version = 1\n\n[app]\nid = \"web\"\n\n[size]\nhand = \"written\"\n",
+    );
 
-    let error = apply(&planned, false).expect_err("second write must refuse");
-    assert!(error.to_string().contains("--force"), "{error}");
+    assert_eq!(
+        apply(&planned, true).expect("forced write").len(),
+        planned.len()
+    );
+    let web = std::fs::read_to_string(fixture.join("apps/web/magictree.toml")).expect("read");
+    assert!(
+        !web.contains("hand = \"written\""),
+        "--force regenerates from discovery:\n{web}"
+    );
+}
 
-    apply(&planned, true).expect("forced overwrite");
+#[test]
+fn apply_refuses_a_manifest_it_cannot_read() {
+    let fixture = monorepo();
+    let report = extract(fixture.path()).expect("extract");
+    let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
+
+    apply(&planned, false).expect("first write");
+    fixture.write("apps/web/magictree.toml", "version = 1\n[[services]\n");
+
+    let error = apply(&planned, false).expect_err("must not touch an unreadable manifest");
+    assert!(
+        error.to_string().contains("apps/web/magictree.toml"),
+        "the error must name the file: {error}"
+    );
 }
 
 #[test]
@@ -255,7 +345,7 @@ fn the_answered_port_variable_reaches_the_manifest() {
         .insert(id, Answer::One("WT_PORT_APP".to_string()));
 
     let planned = plan(&report, &answers, fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
     assert!(
         manifest.contains("port = { env = \"WT_PORT_APP\" }"),
         "{manifest}"
@@ -286,7 +376,7 @@ fn a_direct_command_answer_becomes_a_command_target() {
     );
 
     let planned = plan(&report, &answers, fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
     assert!(
         manifest.contains("command = \"uv run uvicorn app.main:app --port $WT_PORT_SVC\""),
         "{manifest}"
@@ -324,7 +414,7 @@ fn setup_steps_are_detected_and_run_after_install() {
     assert_eq!(setup.default.as_deref(), Some("just:export-openapi"));
 
     let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
     let install = manifest.find("uv sync").expect("install step");
     let generate = manifest.find("just export-openapi").expect("setup step");
     assert!(install < generate, "install must come first:\n{manifest}");
@@ -360,7 +450,7 @@ services:
         Answer::Many(vec!["zitadel".to_string(), "minio".to_string()]),
     );
     let planned = plan(&report, &answers, fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
 
     assert!(
         manifest.contains("env = \"WT_PORT_ZITADEL\""),
@@ -406,7 +496,7 @@ services:
     fixture.git_repo();
     let report = extract(fixture.path()).expect("extract");
     let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
 
     // An initialiser finishes; the services after it must wait for that.
     let stack_init = manifest
@@ -442,8 +532,8 @@ fn single_app_repo_gets_no_workspace_manifest() {
 
     assert_eq!(planned.len(), 1, "a single app is one file");
     assert_eq!(planned[0].path, fixture.path().join("magictree.toml"));
-    assert!(!planned[0].contents.contains("[workspace]"));
-    assert!(planned[0].contents.contains("[app]"));
+    assert!(!planned[0].contents().contains("[workspace]"));
+    assert!(planned[0].contents().contains("[app]"));
 }
 
 #[test]
@@ -571,7 +661,7 @@ fn the_storybook_answer_adds_a_service_on_its_own_port() {
     );
     let report = extract(fixture.path()).expect("extract");
     let planned = plan(&report, &answers_for(&report), fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
     let id = report.apps[0].id.clone();
 
     let storybook = manifest
@@ -630,7 +720,7 @@ fn an_app_started_by_storybook_itself_is_not_started_twice() {
     );
 
     let planned = plan(&report, &answers, fixture.path()).expect("plan");
-    let manifest = &planned[0].contents;
+    let manifest = planned[0].contents();
     assert_eq!(
         manifest.matches("[[services]]").count(),
         1,
@@ -666,8 +756,7 @@ fn an_app_named_storybook_keeps_its_own_service_id() {
         .iter()
         .find(|file| file.path.ends_with("apps/storybook/magictree.toml"))
         .expect("the app manifest")
-        .contents
-        .clone();
+        .contents();
 
     assert!(manifest.contains("id = \"storybook\""), "{manifest}");
     assert!(

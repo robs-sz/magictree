@@ -447,6 +447,12 @@ fn parse(path: &Path) -> Result<Manifest> {
     toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Parse a manifest that is already in memory, for callers that read the file
+/// themselves — `init` compares an existing manifest with what it planned.
+pub fn parse_str(contents: &str) -> Result<Manifest> {
+    toml::from_str(contents).context("parsing manifest")
+}
+
 fn load_apps(workspace_dir: &Path, workspace: &Manifest) -> Result<Vec<App>> {
     let Some(config) = &workspace.workspace else {
         return Ok(Vec::new());

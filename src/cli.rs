@@ -98,7 +98,8 @@ pub struct InitArgs {
     /// Accept every default without prompting.
     #[arg(long, alias = "yes")]
     pub accept_defaults: bool,
-    /// Overwrite existing manifests.
+    /// Regenerate existing manifests from discovery, discarding local edits.
+    /// Without it, an existing manifest only gains the services it lacks.
     #[arg(long)]
     pub force: bool,
     /// Print the manifests without writing them.
@@ -466,15 +467,32 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
     }
     if dry_run || args.print {
         println!("dry run — no manifest is written\n");
-        for file in &planned {
-            println!("# {}", file.path.display());
-            print!("{}", file.contents);
+        for (outcome, contents) in init::preview(&planned, args.force)? {
+            if matches!(outcome, init::Applied::Unchanged(_)) {
+                println!("unchanged {}", outcome.path().display());
+                continue;
+            }
+            println!("# {}", outcome.path().display());
+            print!("{contents}");
             println!();
         }
         return Ok(());
     }
-    for path in init::apply(&planned, args.force)? {
-        println!("wrote {}", path.display());
+    for applied in init::apply(&planned, args.force)? {
+        match applied {
+            init::Applied::Created(path) => println!("wrote {}", path.display()),
+            init::Applied::Updated { path, added } => println!(
+                "updated {}: added service '{}'",
+                path.display(),
+                added.join("', '")
+            ),
+            init::Applied::Unchanged(path) => {
+                println!(
+                    "unchanged {}: every service is already declared",
+                    path.display()
+                )
+            }
+        }
     }
     Ok(())
 }
