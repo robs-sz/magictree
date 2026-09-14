@@ -371,7 +371,7 @@ fn cmd_discover(args: DiscoverArgs) -> Result<()> {
 
 /// The variable a pinned port should read in `discover`'s advice.
 ///
-/// With no manifest there is nothing to point at yet, so the answer is generic —
+/// With no manifest there is nothing to point at yet, so the answer is generic,
 /// except for a script that serves Storybook, which reads no variable at all:
 /// the one `init` hands it is the one a rewrite has to name.
 fn port_variable_for(
@@ -521,7 +521,7 @@ fn cmd_init(args: InitArgs, dry_run: bool) -> Result<()> {
         eprintln!("warning: {warning}");
     }
     if dry_run || args.print {
-        println!("dry run — no manifest is written\n");
+        println!("dry run: no manifest is written\n");
         for (outcome, contents) in init::preview(&planned, args.force)? {
             if matches!(outcome, init::Applied::Unchanged(_)) {
                 println!("unchanged {}", outcome.path().display());
@@ -617,7 +617,7 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
         None => worktrees::plan_path(&repo, &args.branch)?,
     };
     if dry_run {
-        println!("dry run — no worktree is created");
+        println!("dry run: no worktree is created");
         println!(
             "would run git worktree add {} {}",
             args.branch,
@@ -662,7 +662,7 @@ fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
     let repo = Repo::open(&start)?;
     let target = resolve_target(&repo, &args.target)?;
     if dry_run {
-        println!("dry run — nothing is stopped or removed");
+        println!("dry run: nothing is stopped or removed");
         println!("would run down in {}", target.display());
         println!(
             "would run git worktree remove {}{}",
@@ -721,7 +721,7 @@ fn cmd_gc(args: GcArgs, dry_run: bool) -> Result<()> {
     let config = Config::load(&paths)?;
     let apply = !dry_run;
     if !apply {
-        println!("dry run — nothing is released");
+        println!("dry run: nothing is released");
     }
     let timeout = Duration::from_secs(config.stop_timeout_secs);
     if args.all {
@@ -974,7 +974,7 @@ fn cmd_down(args: DownArgs, dry_run: bool) -> Result<()> {
     let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     let ordered = manifest::order(&ctx.nodes, &ctx.edges, &ctx.all_service_indices())?;
     if dry_run {
-        println!("dry run — nothing is stopped");
+        println!("dry run: nothing is stopped");
         for &index in ordered.iter().rev() {
             let node = &ctx.nodes[index];
             if node.service().is_none() {
@@ -1166,7 +1166,7 @@ fn follow(path: &Path, mut offset: u64) -> Result<()> {
 fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
     let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     if dry_run {
-        println!("dry run — no assignment is read, claimed, or released");
+        println!("dry run: no assignment is read, claimed, or released");
         let requests = ctx.port_requests(&ctx.all_service_indices());
         if requests.is_empty() {
             println!("no service exposes a port");

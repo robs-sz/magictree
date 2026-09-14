@@ -258,8 +258,8 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
         }
     }
 
-    // Ports pinned anywhere else — a seed script, a test helper, a committed
-    // env template. Worth naming, but only the service's own command is
+    // Ports pinned anywhere else (a seed script, a test helper, a committed
+    // env template). Worth naming, but only the service's own command is
     // guaranteed to be started by magictree.
     let all_facts: Vec<&Fact> = report.facts.iter().collect();
     for (fact, literal) in ports::all(&all_facts) {

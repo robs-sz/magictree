@@ -425,7 +425,7 @@ fn read_assignment(path: &Path) -> Option<Assignment> {
 /// This is the half of `gc` that cannot be done from the checkout: the checkout
 /// has been deleted, so the state dir is the only surviving record of what was
 /// running. State written before runtime state moved into the state dir died
-/// with its checkout and cannot be reclaimed — only reported as gone.
+/// with its checkout and cannot be reclaimed, only reported as gone.
 fn sweep_worktree_state(
     paths: &Paths,
     repo_key: &str,
@@ -631,7 +631,7 @@ pub fn describe_ports(assignment: &Assignment) -> String {
 /// Rows for `list`: the linked worktrees of this repository with their ports.
 ///
 /// `git worktree list` also reports the primary checkout, but that is not a
-/// worktree `rm` can remove — `remove` refuses the current worktree, and it has
+/// worktree `rm` can remove: `remove` refuses the current worktree, and it has
 /// no administrative directory to name it by. Listing it advertised a row that
 /// `rm` always rejected.
 pub fn worktree_rows(repo: &Repo, paths: &Paths) -> Result<Vec<(String, PathBuf, String)>> {

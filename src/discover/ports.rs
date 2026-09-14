@@ -1,8 +1,8 @@
 //! Hardcoded ports: a file that pins a port magictree cannot vary.
 //!
 //! Every worktree gets its own ports, handed to the process as environment
-//! variables. A command that pins a number — `next dev -p 3005`,
-//! `uvicorn --port=8000`, `DATABASE_PORT=5433` — ignores that: two worktrees
+//! variables. A command that pins a number (`next dev -p 3005`,
+//! `uvicorn --port=8000`, `DATABASE_PORT=5433`) ignores that: two worktrees
 //! fight over the same number, and the health probe watches a port nothing
 //! listens on. This module only finds the literals and renders the rewrite.
 //! Whether a literal is a problem is the caller's call.

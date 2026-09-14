@@ -457,7 +457,7 @@ fn a_service_added_to_the_compose_file_reopens_the_question_that_manages_it() {
     );
 
     // Running again with the recorded answers keeps them and leaves the new
-    // service undecided — it is not quietly marked as declined.
+    // service undecided; it is not quietly marked as declined.
     let mut answers = answers_for(&report);
     for (id, answer) in &recorded.answers {
         answers.answers.insert(id.clone(), answer.clone());

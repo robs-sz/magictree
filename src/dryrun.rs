@@ -33,7 +33,7 @@ struct PlannedHostService {
 }
 pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
     println!(
-        "dry run — nothing below is executed or written\n\nworktree root  {}",
+        "dry run: nothing below is executed or written\n\nworktree root  {}",
         ctx.repo.worktree_root.display()
     );
     println!("repo key       {}", ctx.repo.key());

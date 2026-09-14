@@ -20,7 +20,7 @@ it reports no drift.
 no `[workspace]` the app layer adds no qualification to service names.
 
 `[env]` is layered under the values magictree computes, so it can interpolate the ports
-allocated to this worktree. `${MAGICTREE_PORT_web}` is the plain form of a port variable —
+allocated to this worktree. `${MAGICTREE_PORT_web}` is the plain form of a port variable:
 a single-app repository has no app layer, so nothing is prefixed. Magictree's own keys
 (`MAGICTREE_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`) cannot be redefined here.
 
@@ -36,12 +36,12 @@ that port to accept a connection.
 
 `web` is a host process run through pnpm. `prefer` takes 5173 when it is free and falls back
 to an allocated port otherwise; `needs` holds the service back until `db` is healthy.
-`port.env` must name the variable the process actually reads — the manifest cannot fix a
+`port.env` must name the variable the process actually reads: the manifest cannot fix a
 service that reads a different one.
 
 `api` declares two ports. A service with several ports names each one, and both variables
 are set for the process. `$API_PORT` inside the command is expanded from the allocation, so
-the command itself never pins a port — a command that did (`--port 8000`) would ignore the
+the command itself never pins a port; a command that did (`--port 8000`) would ignore the
 variable and collide with the next worktree.
 
 `migrate-db` is a one-shot container. `expose = "none"` publishes nothing, and

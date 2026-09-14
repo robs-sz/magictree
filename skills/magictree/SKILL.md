@@ -26,7 +26,7 @@ Check whether this repository is onboarded:
 ls magictree.toml
 ```
 
-No manifest means magictree cannot start a stack. Onboard the repository first —
+No manifest means magictree cannot start a stack. Onboard the repository first;
 see "Onboarding a repository" below.
 
 ## Onboarding a repository
@@ -52,17 +52,17 @@ magictree doctor                           # compare manifests against the repos
 `discover` only reads files. It never runs anything from the repository, and it
 never guesses: whatever it cannot determine becomes an explicit question.
 `init` refuses to write anything while a question is unanswered, and it refuses
-answers that were computed from a different report — so re-run `discover` after
+answers that were computed from a different report, so re-run `discover` after
 changing the repository, rather than editing an old answer file.
 
 An existing manifest is **added to, not replaced**: `init` appends the service
-blocks the manifest is missing — a Storybook, a compose service the answers now
-manage — and prints `added service 'storybook'`. Every other line, comment and
+blocks the manifest is missing (a Storybook, a compose service the answers now
+manage) and prints `added service 'storybook'`. Every other line, comment and
 value stays as written, and a step the manifest already runs is never added a
 second time under the plan's name for it.
 
-`init` records what it was told in the manifest at the repository root — the answers, and the
-options each one turned down — and replays it: the next run asks only about what the
+`init` records what it was told in the manifest at the repository root (the answers, and the
+options each one turned down) and replays it: the next run asks only about what the
 repository has since gained, and a question answered `skip` stays skipped. A question that
 offers a set of things is decided one option at a time, so when someone adds a compose
 service, `init` reports that its answer never decided it and leaves it undecided rather than
@@ -98,7 +98,7 @@ magictree down          # stop everything, keep volumes
 `up` finishes by printing every reachable URL, plus any service that is internal
 to the stack (`expose = "none"`), so the addresses to use are always in the
 output. It is idempotent: run it any time. It is safe to re-run after editing `magictree.toml`.
-It exits non-zero and explains itself when a service fails to become healthy — on failure
+It exits non-zero and explains itself when a service fails to become healthy: on failure
 everything stays running so it can be inspected.
 
 ## Prefer --dry-run before acting
@@ -198,8 +198,8 @@ Rules that matter:
 - `runtime` defaults to `compose` when `compose` is present, otherwise a host process.
 - `port.env` must be the variable the process actually reads. Check the app's own
   configuration before assuming `PORT`.
-- A command that pins a port — `next dev -p 3005`, `uvicorn --port 8000`,
-  `DATABASE_PORT=5433` — ignores `port.env`, so the second worktree tries to bind the
+- A command that pins a port (`next dev -p 3005`, `uvicorn --port 8000`,
+  `DATABASE_PORT=5433`) ignores `port.env`, so the second worktree tries to bind the
   same number. `magictree discover` lists these literals, `init` warns about the step it
   chose, and `doctor` reports the service's own command as drift with the rewrite
   (`next dev -p ${APP_PORT:-3005}`). Never paper over one by hardcoding the port in the
@@ -217,8 +217,8 @@ Rules that matter:
   never runs automatically.
 - A one-shot compose initialiser (provisioning, migrations) needs `wait = "exit"`, so
   `up` waits for it to finish successfully instead of moving on while it runs.
-- Services that derive their own URLs from a port — `${WT_PORT_ZITADEL}` in another
-  service's environment, or a callback URL registered at startup — need that variable
+- Services that derive their own URLs from a port (`${WT_PORT_ZITADEL}` in another
+  service's environment, or a callback URL registered at startup) need that variable
   set for the whole stack. Ports declare it with `port.env`, and cross-service
   references go in `[env]`, where `${MAGICTREE_PORT_<service>}` resolves to the port
   this worktree published.

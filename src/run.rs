@@ -78,7 +78,7 @@ pub fn start(
 
     // Reap the child when it exits. Without this a process that dies during
     // startup lingers as a zombie, and liveness checks keep reporting it as
-    // running — which makes a failure report actively misleading.
+    // running, which makes a failure report actively misleading.
     std::thread::spawn(move || {
         let _ = child.wait();
     });

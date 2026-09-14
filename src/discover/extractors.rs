@@ -583,7 +583,7 @@ impl Builder {
     }
 }
 
-/// Port literals in a set of steps — a script, recipe, or process body — each
+/// Port literals in a set of steps (a script, recipe, or process body), each
 /// labelled with the step it came from.
 fn port_literals<'a>(steps: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<PortLiteralFact> {
     let mut out = Vec::new();
@@ -1304,7 +1304,7 @@ fn run_candidates(root: &Path, app: &AppFacts, facts: &[Fact]) -> Vec<Candidate>
                     // The recipe body often names a command we can run without
                     // the task runner. Offer it so the repository's tooling can
                     // be left out of the loop, but only when no native runner
-                    // already covers it — otherwise it is the same command twice.
+                    // already covers it; otherwise it is the same command twice.
                     if let Some(body) = recipe_bodies.get(recipe) {
                         if let Some(command) = inline_recipe(body, variables) {
                             if !native_runner_covers(&command) {
@@ -1585,7 +1585,7 @@ fn exported_parameters(raw: &str) -> Vec<String> {
 
 /// Environment variable names a justfile reads from the ambient environment:
 /// only `env("X")` and `env_var("X")` qualify. Values the justfile assigns,
-/// exports, or passes to a recipe are outputs — an ambient value for those is
+/// exports, or passes to a recipe are outputs: an ambient value for those is
 /// overwritten rather than read.
 fn env_reads(raw: &str) -> Vec<String> {
     let mut names = BTreeSet::new();

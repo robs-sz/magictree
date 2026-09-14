@@ -18,11 +18,11 @@ git commit -m "add magictree.toml"
 
 A worktree inherits only what git tracks, so an uncommitted `magictree.toml` is invisible to
 every worktree created afterwards: `up` there fails with the fix, rather than starting a
-stack that silently does not exist. Run `discover` and `init` in the primary checkout — the
-one `git worktree list` prints first, and the one `magictree list` never shows.
+stack that silently does not exist. Run `discover` and `init` in the primary checkout (the
+one `git worktree list` prints first, and the one `magictree list` never shows).
 
 Onboarding does not end at the first run. Run `discover` and `init` again after the
-repository gains something — a Storybook, a new compose service — and `init` asks only about
+repository gains something (a Storybook, a new compose service) and `init` asks only about
 what it has not been told before: the answers it was given are recorded in the manifest at
 the repository root, and replayed on the next run. A question answered `skip` stays skipped
 even after the repository gains what it declined.
@@ -36,15 +36,15 @@ declined = { "compose.shared" = ["mailpit"] }
 A question that offers several things is answered one option at a time, so what the answer
 turned down is recorded beside it: that is what shows a later run that a service someone
 added to the compose file has never been decided rather than turned down. `init` says which
-services and options are new and leaves them undecided — it never answers a question in your
-name — and the next interactive run asks about them, marking the new options. `--reanswer`
+services and options are new and leaves them undecided (it never answers a question in your
+name), and the next interactive run asks about them, marking the new options. `--reanswer`
 asks every question again, taking discovery's defaults.
 
 Otherwise `init` appends the service blocks the manifest is missing and leaves every other
 line, comment and value as it was. A step the manifest already runs is not added a second
 time, whatever the service is called there, and `init` says which services it added, which
 answers it recorded and which manifests it left alone. An answer that changed cannot reach a
-service already written — an update never rewrites one — so `init` says so and points at
+service already written (an update never rewrites one), so `init` says so and points at
 `--force`, which regenerates the file from the recorded answers.
 
 ```sh
@@ -57,7 +57,7 @@ cd ../repo-billing && magictree up
 
 Nothing is configured per worktree: each gets its own port block, its own `MAGICTREE_SLUG`
 (the directory name; `main` in the primary checkout), and its own state, so the same service
-binds a different port in every checkout. Untracked build output is not inherited either —
+binds a different port in every checkout. Untracked build output is not inherited either;
 `[bootstrap] sync` links it from the primary checkout.
 
 ```sh
@@ -115,8 +115,8 @@ The install step and its `inputs` cache key come from whichever lockfile is pres
 else `package.json` or `pyproject.toml`.
 
 Storybook is the one service whose flags the manifest supplies. Its dev server takes `-p`/`--port`
-and reads no environment variable of its own, so `init` appends the allocated port — and
-`--no-open`, which keeps `up` from opening a browser — to the repository's own script:
+and reads no environment variable of its own, so `init` appends the allocated port (and
+`--no-open`, which keeps `up` from opening a browser) to the repository's own script:
 
 ```toml
 [[services]]
@@ -160,12 +160,12 @@ A service is either a host process (`target` or `command`) or a container (`comp
 |---|---|---|
 | `id` | required | Service name. Unique in the manifest, and not also a job id. |
 | `runtime` | `compose` when `compose` is set, otherwise `host` | How the service is launched. |
-| `compose` | — | `{ file = "compose.yaml", service = "api" }`; required for a compose service. |
-| `target` / `command` | — | Exactly one, host services only. |
-| `port` / `ports` | — | Port declarations; see below. |
+| `compose` | - | `{ file = "compose.yaml", service = "api" }`; required for a compose service. |
+| `target` / `command` | - | Exactly one, host services only. |
+| `port` / `ports` | - | Port declarations; see below. |
 | `expose` | `"port"` | `"none"` publishes nothing, which is also what a service with no ports does; `"none"` clears ports the compose file declares. |
 | `needs` | `[]` | Services or jobs that must be healthy first. |
-| `health` | — | Probe that decides a host service is ready. |
+| `health` | - | Probe that decides a host service is ready. |
 | `wait` | `"running"` | `"exit"` waits for a one-shot container to finish successfully. |
 
 A host service sets `command` or `target`, never both; a compose service sets `compose` and
@@ -208,7 +208,7 @@ a port only when the host needs to reach it.
 #### Health
 
 `health = { http = "/healthz", timeout = 60 }`: `http` polls that path on the allocated port,
-`tcp = true` only checks the port, and `command` must exit zero — the first present wins.
+`tcp = true` only checks the port, and `command` must exit zero; the first present wins.
 `timeout` is in seconds, defaulting to `health_timeout_secs` (60) from
 `~/.config/magictree/config.toml`.
 
@@ -231,7 +231,7 @@ generator, with its prerequisites in `needs` rather than wrapped into a service 
 | `when` | `"up"` | `"up"` runs it during `up`; `"manual"` runs it only when named. |
 | `needs` | `[]` | Services or jobs that must be healthy before it runs. |
 
-`needs` resolves like a service's — its own app first, then the workspace — and is started
+`needs` resolves like a service's (its own app first, then the workspace) and is started
 before the job, so `magictree up seed` starts `db`, runs `migrate`, then runs `seed`.
 
 `when = "up"` jobs run on every `up` that selects their scope (the current app in a monorepo,
@@ -265,8 +265,8 @@ one.
 
 Ports come from `20000-32767`, are stable across restarts, and are never visible inside
 containers. Generated state lives in magictree's state dir, keyed by repository and worktree,
-so **nothing is ever written into the checkout** — `git status` stays clean without a
-`.gitignore` or `git/info/exclude` entry — and `gc` can stop a worktree's processes after its
+so **nothing is ever written into the checkout** (`git status` stays clean without a
+`.gitignore` or `git/info/exclude` entry) and `gc` can stop a worktree's processes after its
 checkout is gone. `gc` reconciles one repository; `magictree gc --all` sweeps every repository
 the state dir knows about, the only way to reclaim one that is itself gone.
 

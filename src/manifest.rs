@@ -448,7 +448,7 @@ fn parse(path: &Path) -> Result<Manifest> {
 }
 
 /// Parse a manifest that is already in memory, for callers that read the file
-/// themselves — `init` compares an existing manifest with what it planned.
+/// themselves; `init` compares an existing manifest with what it planned.
 pub fn parse_str(contents: &str) -> Result<Manifest> {
     toml::from_str(contents).context("parsing manifest")
 }

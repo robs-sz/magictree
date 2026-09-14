@@ -26,7 +26,7 @@ const PRIMARY_WORKTREE_ID: &str = "main";
 ///
 /// Git names that directory after the checkout's basename and refuses a name
 /// only when another worktree already holds it, so a worktree checked out at
-/// `.../main` is named `main` too — the identity the primary checkout reserves.
+/// `.../main` is named `main` too: the identity the primary checkout reserves.
 /// Sharing it would resolve both to one port block, one runtime directory and
 /// one compose project. Hashing the git directory disambiguates exactly that
 /// name and leaves every other one untouched.

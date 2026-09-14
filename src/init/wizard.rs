@@ -2,7 +2,7 @@
 //!
 //! The wizard collects answers; `init::plan` turns them into manifests. Both the
 //! wizard and an agent therefore produce identical output, because neither one
-//! writes files — they only supply answers.
+//! writes files; they only supply answers.
 
 use crate::discover::report::{
     Answer, AnswerSet, Report, Scope, Unknown, UnknownKind, ANSWERS_VERSION,
@@ -101,7 +101,7 @@ pub struct Session {
 ///
 /// `recorded` holds what an earlier run answered, which is where the manifest
 /// records it. Those questions are not asked again unless the caller changes
-/// them, or unless the question now offers something the answer never decided —
+/// them, or unless the question now offers something the answer never decided:
 /// a compose service someone added, an app that appeared. Those are marked, so
 /// it is obvious what is new.
 pub fn prompt(

@@ -153,7 +153,7 @@ pub fn free_port() -> u16 {
 ///
 /// Test binaries each own a separate state directory, so their allocators are
 /// independent and can choose the same port. If the port is already taken the
-/// premise of the test — that it is unavailable — still holds, so that is not
+/// premise of the test (that it is unavailable) still holds, so that is not
 /// an error.
 pub struct PortGuard {
     listener: Option<std::net::TcpListener>,
@@ -167,7 +167,7 @@ impl PortGuard {
     }
 
     /// Occupy `port` the way a dev server does, on the wildcard rather than
-    /// loopback — the shape that has to be probed to be seen.
+    /// loopback, the shape that has to be probed to be seen.
     pub fn occupy_wildcard(port: u16) -> Self {
         Self::occupy_on(("::", port), port)
     }

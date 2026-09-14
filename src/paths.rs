@@ -44,7 +44,7 @@ impl Paths {
 }
 
 /// Move a directory into place, falling back to a copy when source and
-/// destination are on different filesystems — a checkout can live on an
+/// destination are on different filesystems: a checkout can live on an
 /// external volume while the state dir sits under `$HOME`.
 pub fn move_dir(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {

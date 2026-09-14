@@ -47,7 +47,7 @@ impl Project {
         docker_lines(&["volume", "ls", "-q", "--filter", &self.project_filter()])
     }
 
-    /// `docker <prefix> <ids…>`, skipped when there is nothing to act on.
+    /// `docker <prefix> <ids...>`, skipped when there is nothing to act on.
     fn force(&self, prefix: &[&str], ids: &[String]) {
         if ids.is_empty() {
             return;
@@ -179,7 +179,7 @@ fn gc_reclaims_a_dead_worktrees_container_and_volume() {
 
 #[test]
 fn gc_reclaims_a_volume_whose_containers_are_already_gone() {
-    // A teardown done by hand — `docker compose down` without `-v` — leaves the
+    // A teardown done by hand (`docker compose down` without `-v`) leaves the
     // volume behind with nothing to attribute it to but the project name the
     // worktree recorded before its checkout went away.
     if !docker_ready() {

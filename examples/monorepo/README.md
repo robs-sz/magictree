@@ -29,7 +29,7 @@ the host. `jobs.shared-seed` belongs to the workspace rather than to an app.
 
 The app manifest keeps bare service ids; from another app or from the command line the
 service is `web:web`. `needs = ["db"]` resolves to the workspace service, and
-`${MAGICTREE_PORT_web_web}` is the app-qualified form of the port variable —
+`${MAGICTREE_PORT_web_web}` is the app-qualified form of the port variable:
 `MAGICTREE_PORT_<app>_<service>`. `jobs.migrate` needs `web`, which resolves inside its own
 app first.
 

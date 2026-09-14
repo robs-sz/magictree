@@ -123,7 +123,7 @@ pub fn ensure(
         }
     }
     bail!(
-        "no free port block in {}..{} — run `magictree gc` or widen the range in {}",
+        "no free port block in {}..{}; run `magictree gc` or widen the range in {}",
         config.port_range_start,
         config.port_range_end,
         paths.config_file().display()
@@ -189,7 +189,7 @@ fn extend(
         return Ok(candidate);
     }
     bail!(
-        "no free port left in block {} for '{}' — run `magictree ports --reassign`",
+        "no free port left in block {} for '{}'; run `magictree ports --reassign`",
         assignment.base,
         request.name
     )
@@ -276,7 +276,7 @@ fn assign_in_block(
 /// `127.0.0.1` or `::1` still succeeds while another process holds the wildcard,
 /// so a dev server listening on `::` looked free: two worktrees were handed the
 /// same port, the second service died with `EADDRINUSE`, and its health probe was
-/// answered by the first worktree's process — recording a stack that was never up.
+/// answered by the first worktree's process, recording a stack that was never up.
 ///
 /// Each shape is caught only by its own probe, so all four are needed:
 ///

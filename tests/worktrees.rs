@@ -409,7 +409,7 @@ fn remove_refuses_the_current_worktree() {
 }
 
 /// Git names a worktree's administrative directory after the checkout's
-/// basename, so a checkout at `.../main` is registered as `main` — the identity
+/// basename, so a checkout at `.../main` is registered as `main`, the identity
 /// the primary checkout reserves. Left indistinguishable, the two would resolve
 /// to one port block, one runtime directory and one compose project.
 #[test]

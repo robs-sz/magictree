@@ -358,8 +358,8 @@ const DECLINED_KEY: &str = "declined";
 /// answers passed over.
 ///
 /// The options matter as much as the answers. A question that offers a choice of
-/// several things — which apps are in the stack, which compose services are
-/// shared — is decided one option at a time, so an option that was neither
+/// several things (which apps are in the stack, which compose services are
+/// shared) is decided one option at a time, so an option that was neither
 /// chosen nor turned down is one nobody has decided yet. Without this, a service
 /// someone added to the compose file would be silently left unmanaged.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -380,7 +380,7 @@ impl Stored {
 /// what the answer turned down is as much a part of the answer as what it chose.
 /// A question the previous run already answered keeps what it turned down then:
 /// its answer was given against the options of that day, and an option that has
-/// appeared since is one nobody has decided — which is exactly what reopens the
+/// appeared since is one nobody has decided, which is exactly what reopens the
 /// question. Recomputing it here would quietly mark the new option as declined
 /// and leave it out of the manifest for good.
 pub fn record(
@@ -549,8 +549,8 @@ pub struct Recorded {
     /// The options those answers turned down when they were given, carried
     /// forward so a replayed question is not re-decided against today's options.
     pub declined: BTreeMap<String, Vec<String>>,
-    /// The answers whose question now offers options they never decided — a
-    /// compose service someone added, an app that appeared — with those options.
+    /// The answers whose question now offers options they never decided (a
+    /// compose service someone added, an app that appeared), with those options.
     pub reopened: BTreeMap<String, Vec<String>>,
     /// Answers this report no longer offers at all.
     pub dropped: Vec<(String, Answer)>,
@@ -606,7 +606,7 @@ pub fn recorded(root: &Path, report: &Report) -> Result<Recorded> {
     Ok(recorded)
 }
 
-/// The manifest with its record replaced — or added before the first table, or
+/// The manifest with its record replaced, or added before the first table, or
 /// dropped when there is nothing left to record.
 fn with_answers(contents: &str, stored: &Stored) -> String {
     let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
@@ -868,8 +868,8 @@ fn decide(planned: &[Generated], force: bool) -> Result<Vec<(Applied, String)>> 
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<String>>()
         });
-        // A manifest may declare a step under a name of its own — the app's
-        // service renamed, or its app id chosen over the derived one. The step
+        // A manifest may declare a step under a name of its own (the app's
+        // service renamed, or its app id chosen over the derived one). The step
         // is what must not run twice, so a service the manifest already runs is
         // not added again.
         let declared_steps: BTreeSet<String> =
@@ -1047,7 +1047,7 @@ pub fn warnings(report: &Report, answers: &AnswerSet) -> Vec<String> {
 
 /// Bootstrap runs the install first, then whatever generates files the dev
 /// server imports. Generation steps deliberately declare no `inputs`, so they
-/// run on every `up` — a missing generated file is not worth caching around.
+/// run on every `up`: a missing generated file is not worth caching around.
 fn bootstrap_section(app_root: &Path, setup: &[String]) -> Result<Option<String>> {
     let install = install_command(app_root);
     let inputs = install_inputs(app_root);

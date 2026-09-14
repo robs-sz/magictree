@@ -171,7 +171,7 @@ pub fn write_override(runtime_dir: &Path, group: &ComposeGroup) -> Result<PathBu
         out.push_str(&format!("      magictree.repo: \"{}\"\n", group.repo_key));
         // Publish only when there is something to publish. `expose` defaults to
         // `port`, so a compose service that declares no ports used to emit
-        // `ports: !override` with nothing under it — YAML null, which Compose
+        // `ports: !override` with nothing under it, YAML null, which Compose
         // rejects outright ("services.x.ports must be a array"), so the service
         // could not start at all. Nothing declared means publish nothing, which
         // is also how `expose = "none"` clears ports the base file declares.
