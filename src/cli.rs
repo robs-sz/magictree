@@ -853,18 +853,13 @@ fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
     )?;
 
     for (dir, app, steps) in ctx.bootstrap_targets(selection) {
-        for message in bootstrap::sync_files(&ctx.repo, &ctx.repo.worktree_root, &steps.sync)? {
+        for message in bootstrap::sync_files(&ctx.repo, &ctx.repo.worktree_root, &dir, &steps.sync)?
+        {
             println!("{message}");
         }
         if !steps.run.is_empty() {
             let env = ctx.build_env(app.as_deref(), &assignment)?;
-            for message in bootstrap::run_steps(
-                &ctx.runtime_dir,
-                &ctx.repo.worktree_root,
-                &dir,
-                &steps.run,
-                &env.vars,
-            )? {
+            for message in bootstrap::run_steps(&ctx.runtime_dir, &dir, &steps.run, &env.vars)? {
                 println!("{message}");
             }
         }

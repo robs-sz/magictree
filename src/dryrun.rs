@@ -64,9 +64,12 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
             continue;
         }
         println!("({})", display_relative(&ctx.repo.worktree_root, &dir));
+        let prefix = dir
+            .strip_prefix(&ctx.repo.worktree_root)
+            .unwrap_or(Path::new(""));
         for path in &steps.sync {
-            let source = ctx.repo.main_worktree_root().join(path);
-            let destination = ctx.repo.worktree_root.join(path);
+            let source = ctx.repo.main_worktree_root().join(prefix).join(path);
+            let destination = dir.join(path);
             if destination.exists() {
                 println!("  sync  {path}: already present, would skip");
             } else if source.exists() && !ctx.repo.is_main_worktree() {

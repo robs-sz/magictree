@@ -231,6 +231,11 @@ worktree is missing them. `run` is a list of shell commands: a bare string, or
 `{ command = "pnpm prisma generate", inputs = ["prisma/schema.prisma"] }`, whose `inputs` skip
 the step while those files are unchanged since its last successful run.
 
+Both `sync` paths and `inputs` are relative to the manifest that declares them, matching the
+directory its commands run in: an app manifest's `sync = ["node_modules"]` links the app's own
+`node_modules`, and its `inputs = ["uv.lock"]` means the app's `uv.lock`. A root manifest's
+paths are relative to the repository root.
+
 ### Jobs
 
 A job is a one-shot command, declared as a `[jobs.<id>]` table: a migration, a seed, a code

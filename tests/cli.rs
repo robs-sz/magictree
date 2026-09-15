@@ -865,3 +865,147 @@ fn up_all_starts_every_app_even_inside_one() {
     let down = run(&["down"], fixture.path(), &state);
     assert!(down.ok(), "{}", down.combined());
 }
+
+/// An app's bootstrap `inputs` name files inside the app, matching the working
+/// directory its command runs in: `uv.lock` means `apps/api/uv.lock`, not
+/// `uv.lock` at the worktree root, where no such file exists.
+#[test]
+fn monorepo_app_bootstrap_resolves_inputs_inside_the_app() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[workspace]\napps = [\"apps/api\"]\n",
+    );
+    fixture.write("apps/api/uv.lock", "version = 1\n");
+    fixture.write(
+        "apps/api/magictree.toml",
+        r#"
+version = 1
+[app]
+id = "api"
+
+[bootstrap]
+run = [{ command = "echo api bootstrapped", inputs = ["uv.lock"] }]
+
+[[services]]
+id = "api"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let up = run(&["up", "--all"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(up.stdout.contains("api bootstrapped"), "{}", up.stdout);
+
+    let down = run(&["down"], fixture.path(), &state);
+    assert!(down.ok(), "{}", down.combined());
+}
+
+/// Two apps can declare the same install command over different lockfiles, so
+/// each step caches against its own inputs: app a's lockfile must not decide
+/// app b's step is up to date.
+#[test]
+fn identical_bootstrap_commands_in_two_apps_cache_separately() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[workspace]\napps = [\"apps/a\", \"apps/b\"]\n",
+    );
+    for (app, lock) in [("a", "lockfileVersion: 9\n"), ("b", "lockfileVersion: 8\n")] {
+        fixture.write(&format!("apps/{app}/pnpm-lock.yaml"), lock);
+        fixture.write(
+            &format!("apps/{app}/magictree.toml"),
+            &format!(
+                r#"
+version = 1
+[app]
+id = "{app}"
+
+[bootstrap]
+run = [{{ command = "echo install {app}", inputs = ["pnpm-lock.yaml"] }}]
+
+[[services]]
+id = "web"
+command = "sleep 300"
+port = {{ env = "PORT" }}
+"#
+            ),
+        );
+    }
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let up = run(&["up", "--all"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        up.stdout.contains("install a") && up.stdout.contains("install b"),
+        "{}",
+        up.stdout
+    );
+
+    let again = run(&["up", "--all"], fixture.path(), &state);
+    assert!(again.ok(), "{}", again.combined());
+    assert_eq!(
+        again.stdout.matches("cached").count(),
+        2,
+        "every app's step caches against its own inputs: {}",
+        again.stdout
+    );
+
+    let down = run(&["down"], fixture.path(), &state);
+    assert!(down.ok(), "{}", down.combined());
+}
+
+/// An app's `sync` paths are inside the app too: a linked worktree links
+/// `apps/web/node_modules`, so the app's own generated dependencies appear.
+#[test]
+fn monorepo_app_sync_links_inside_the_app() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[workspace]\napps = [\"apps/web\"]\n",
+    );
+    fixture.write(
+        "apps/web/magictree.toml",
+        r#"
+version = 1
+[app]
+id = "web"
+
+[bootstrap]
+sync = ["node_modules"]
+
+[[services]]
+id = "web"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    // Installed dependencies are untracked, so a new worktree starts without
+    // them and `sync` is what supplies them.
+    fixture.mkdir("apps/web/node_modules");
+
+    let added = fixture.git(&["worktree", "add", "-q", "wt", "-b", "wt"]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join("wt");
+    let state = fixture.state_dir();
+
+    let up = run(&["up", "--all"], &worktree, &state);
+    assert!(up.ok(), "{}", up.combined());
+    let linked = worktree.join("apps/web/node_modules");
+    assert!(
+        linked
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false),
+        "sync must link the app's own node_modules: {}",
+        up.combined()
+    );
+
+    let down = run(&["down"], &worktree, &state);
+    assert!(down.ok(), "{}", down.combined());
+}

@@ -212,7 +212,10 @@ Rules that matter:
   exposes. `expose = "none"` publishes nothing.
 - Several ports on one service use `ports = [ { name = "api", target = 9000 }, ... ]`.
   A single `port = {...}` keeps the plain name; multiple ports are named.
-- Bootstrap steps with `inputs` are skipped when those files are unchanged.
+- Bootstrap steps with `inputs` are skipped when those files are unchanged. An app
+  manifest's `sync` paths and `inputs` are relative to that manifest's own directory, the
+  same directory its commands run in: `inputs = ["uv.lock"]` in `api/magictree.toml` means
+  `api/uv.lock`. Only a root manifest's paths are relative to the repository root.
 - `[jobs.<id>]` with `when = "up"` runs once after its `needs` are healthy; `when = "manual"`
   never runs automatically.
 - A one-shot compose initialiser (provisioning, migrations) needs `wait = "exit"`, so

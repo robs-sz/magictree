@@ -28,16 +28,26 @@ pub fn save_state(runtime_dir: &Path, state: &State) -> Result<()> {
 }
 
 /// Link untracked or generated paths from the primary checkout into this
-/// worktree. Existing paths are never replaced.
-pub fn sync_files(repo: &Repo, worktree_root: &Path, paths: &[String]) -> Result<Vec<String>> {
+/// worktree. Paths are relative to the manifest that declares them, so an app
+/// manifest's `sync = ["node_modules"]` links `<app>/node_modules`.
+/// Existing paths are never replaced.
+pub fn sync_files(
+    repo: &Repo,
+    worktree_root: &Path,
+    manifest_dir: &Path,
+    paths: &[String],
+) -> Result<Vec<String>> {
     let mut messages = Vec::new();
     if repo.is_main_worktree() {
         return Ok(messages);
     }
     let source_root = repo.main_worktree_root();
+    let prefix = manifest_dir
+        .strip_prefix(worktree_root)
+        .unwrap_or(Path::new(""));
     for relative in paths {
-        let source = source_root.join(relative);
-        let destination = worktree_root.join(relative);
+        let source = source_root.join(prefix).join(relative);
+        let destination = manifest_dir.join(relative);
         if destination.exists() {
             messages.push(format!("sync {relative}: present"));
             continue;
@@ -57,9 +67,11 @@ pub fn sync_files(repo: &Repo, worktree_root: &Path, paths: &[String]) -> Result
 }
 
 /// Run bootstrap commands, skipping steps whose declared inputs are unchanged.
+/// Inputs are relative to the manifest that declares them, matching the
+/// command's working directory and `doctor`'s existence check: an app
+/// manifest's `inputs = ["uv.lock"]` means `<app>/uv.lock`.
 pub fn run_steps(
     runtime_dir: &Path,
-    worktree_root: &Path,
     manifest_dir: &Path,
     steps: &[crate::manifest::RunStep],
     env: &BTreeMap<String, String>,
@@ -68,9 +80,11 @@ pub fn run_steps(
     let mut messages = Vec::new();
     for step in steps {
         let command = step.command();
-        let key = command.to_string();
+        // Two apps can declare the same command with different inputs, so the
+        // cache entry belongs to the manifest that declared it.
+        let key = format!("{}::{command}", manifest_dir.display());
         if !step.inputs().is_empty() {
-            let digest = inputs_digest(worktree_root, step.inputs())?;
+            let digest = inputs_digest(manifest_dir, step.inputs())?;
             if state.bootstrap.get(&key).map(String::as_str) == Some(digest.as_str()) {
                 messages.push(format!("run {command}: cached"));
                 continue;
@@ -88,11 +102,11 @@ pub fn run_steps(
     Ok(messages)
 }
 
-fn inputs_digest(worktree_root: &Path, inputs: &[String]) -> Result<String> {
+fn inputs_digest(manifest_dir: &Path, inputs: &[String]) -> Result<String> {
     let mut hasher = Sha256::new();
     for relative in inputs {
         hasher.update(relative.as_bytes());
-        let path = worktree_root.join(relative);
+        let path = manifest_dir.join(relative);
         let metadata = std::fs::metadata(&path)
             .with_context(|| format!("bootstrap input '{relative}' does not exist"))?;
         if metadata.is_dir() {
