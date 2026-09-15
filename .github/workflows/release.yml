@@ -93,9 +93,21 @@ jobs:
             range="$tag"
           fi
           git log --no-merges --invert-grep --grep='^release v[0-9]' \
-            --pretty='- %s' "$range" > "$RUNNER_TEMP/notes.md"
+            --pretty='%s' "$range" | awk '
+            function bullet(list, n,   i) { for (i = 1; i <= n; i++) print "- " list[i] }
+            function strip(s) { sub(/^[a-zA-Z]+(\([^)]*\))?!?: /, "", s); return s }
+            /^feat(\([^)]*\))?!?: / { feat[++nf] = strip($0); next }
+            /^fix(\([^)]*\))?!?: / { fix[++nx] = strip($0); next }
+            /^docs?(\([^)]*\))?!?: / { docs[++nd] = strip($0); next }
+            { other[++no] = $0 }
+            END {
+              if (nf) { print "### Features"; bullet(feat, nf); print "" }
+              if (nx) { print "### Bug Fixes"; bullet(fix, nx); print "" }
+              if (nd) { print "### Documentation"; bullet(docs, nd); print "" }
+              if (no) { print "### Other Changes"; bullet(other, no); print "" }
+            }' > "$RUNNER_TEMP/notes.md"
           if [ -n "$previous" ]; then
-            printf '\n**Full Changelog**: %s/%s/compare/%s...%s\n' \
+            printf '**Full Changelog**: %s/%s/compare/%s...%s\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$previous" "$tag" \
               >> "$RUNNER_TEMP/notes.md"
           fi
