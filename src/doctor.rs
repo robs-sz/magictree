@@ -185,6 +185,13 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
             if service.expose == Expose::None {
                 continue;
             }
+            // A recipe parameter (`$NAME=default`) only replaces the injected
+            // value when the service is launched through that justfile. A
+            // service started any other way never runs it, so its declared
+            // variable is the one its own process reads.
+            if !service_runs_justfile(service) {
+                continue;
+            }
             let reads: BTreeSet<&String> = facts
                 .iter()
                 .filter_map(|fact| match &fact.data {
@@ -481,6 +488,20 @@ fn command_hands_over(service: &Service, variable: &str) -> bool {
         .next()
         .map_or(true, |next| !(next.is_ascii_alphanumeric() || next == '_'));
     closes && (!command.starts_with("npm ") || command[..at].contains(" -- "))
+}
+
+/// True when the command magictree launches for this service goes through a
+/// `justfile`, the only case where a recipe parameter can hand the service a
+/// different port than the one magictree injected.
+fn service_runs_justfile(service: &Service) -> bool {
+    let command = match (&service.target, &service.command) {
+        (Some(target), _) => target.command(),
+        (None, Some(command)) => command.clone(),
+        (None, None) => return false,
+    };
+    command
+        .split_whitespace()
+        .any(|token| token == "just" || token.ends_with("/just"))
 }
 
 /// Where a service's port should come from, and whether the manifest says so.

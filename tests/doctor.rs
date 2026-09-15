@@ -175,6 +175,70 @@ port = { env = "WT_PORT_SVC" }
     assert_eq!(drift_summaries(&fixture), Vec::<String>::new());
 }
 
+/// A justfile that sets a variable for one of its own recipes says nothing
+/// about a service magictree starts some other way: `pnpm run dev` never reads
+/// the justfile, so the variable that process reads is the right one to
+/// declare, however the justfile spells its own.
+#[test]
+fn a_service_magictree_does_not_start_through_just_takes_its_declared_variable() {
+    let fixture = justfile_port_fixture("target = { kind = \"pnpm\", script = \"dev\" }");
+    assert_eq!(drift_summaries(&fixture), Vec::<String>::new());
+}
+
+/// The same variable is drift when magictree does launch the recipe: `just`
+/// hands the recipe's own value to the process, overwriting the injected one.
+#[test]
+fn a_service_started_through_just_is_held_to_the_variable_it_declares() {
+    let fixture = justfile_port_fixture("target = { kind = \"just\", recipe = \"dev\" }");
+    let summaries = drift_summaries(&fixture);
+    assert_eq!(summaries.len(), 1, "{summaries:?}");
+    assert!(
+        summaries[0].contains("WEB_PORT"),
+        "the message must name the offending variable: {summaries:?}"
+    );
+}
+
+/// A `command` that runs the justfile is on the same hook as a `just` target.
+#[test]
+fn a_command_that_runs_just_is_held_to_the_same_rule() {
+    let fixture = justfile_port_fixture("command = \"just dev\"");
+    let summaries = drift_summaries(&fixture);
+    assert!(
+        summaries.iter().any(|entry| entry.contains("WEB_PORT")),
+        "a command running a recipe overwrites the port the same way: {summaries:?}"
+    );
+}
+
+/// A repository whose justfile exports a port variable for its `dev` recipe,
+/// with the service launched by whichever `service` line the caller passes.
+fn justfile_port_fixture(service: &str) -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "justfile",
+        "wt_port_web := env(\"WT_PORT_WEB\", \"3000\")\n\ndev $WEB_PORT=wt_port_web:\n  pnpm dev\n",
+    );
+    fixture.write(
+        "package.json",
+        r#"{"name":"web","packageManager":"pnpm@9","scripts":{"dev":"vite dev"}}"#,
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"
+version = 1
+
+[[services]]
+id = "web"
+{service}
+port = {{ env = "WEB_PORT" }}
+"#
+        ),
+    );
+    fixture.git_repo();
+    fixture
+}
+
 #[test]
 fn a_bootstrap_input_that_no_longer_exists_is_drift() {
     let fixture = repo();
