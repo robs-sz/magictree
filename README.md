@@ -92,6 +92,7 @@ magictree gc                 # reclaim what deleted checkouts left behind
 | `logs`, `env`, `ports` | service output, resolved environment, port assignment |
 | `exec` | run a command with this worktree's resolved environment |
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |
+| `completion` | a shell completion script, printed to stdout |
 
 `--dry-run` works on every command and creates nothing.
 
@@ -105,6 +106,22 @@ resolved ports and `[env]` on top of your own environment, and runs them in the 
 becomes magictree's, so a recipe can delegate to it instead of hand-rolling
 `eval "$(magictree env --export)"`. Use `magictree exec -- sh -c '...'` when you need a
 shell.
+
+## Completion
+
+`completion` prints a script for bash, zsh, fish, elvish or powershell:
+
+```sh
+magictree completion zsh  > ~/.zsh/completions/_magictree
+magictree completion bash > ~/.local/share/bash-completion/completions/magictree
+magictree completion fish > ~/.config/fish/completions/magictree.fish
+```
+
+zsh loads a completion only from a directory on `$fpath`, so `~/.zsh/completions` has to be on
+`$fpath` *before* `compinit` runs: put it there in `.zshrc`, above the line that sets up
+completion, and open a new shell. A shell that was already running reuses its `~/.zcompdump`,
+keeps the registration even when the file it names has moved, and fails on Tab with
+`_magictree: function definition file not found` until the shell is restarted.
 
 ## Manifest
 
