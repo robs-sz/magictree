@@ -111,6 +111,9 @@ jobs:
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$previous" "$tag" \
               >> "$RUNNER_TEMP/notes.md"
           fi
-          gh release view "$tag" > /dev/null 2>&1 ||
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --notes-file "$RUNNER_TEMP/notes.md"
+          else
             gh release create "$tag" --verify-tag --notes-file "$RUNNER_TEMP/notes.md"
+          fi
           gh release upload "$tag" dist/*.tar.gz --clobber
