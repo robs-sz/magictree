@@ -1,5 +1,5 @@
 use crate::ctx::Ctx;
-use crate::manifest::{Expose, NodeKind, Runtime};
+use crate::manifest::{Expose, NodeKind, RunStep, Runtime};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -56,14 +56,17 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
     }
 
     let targets = ctx.bootstrap_targets(selection);
-    if !targets.is_empty() {
+    if targets
+        .iter()
+        .any(|(_, _, steps)| !steps.sync.is_empty() || !steps.run.is_empty())
+    {
         println!("\n# bootstrap");
     }
-    for (dir, _app, steps) in targets {
+    for (dir, _app, steps) in &targets {
         if steps.sync.is_empty() && steps.run.is_empty() {
             continue;
         }
-        println!("({})", display_relative(&ctx.repo.worktree_root, &dir));
+        println!("({})", display_relative(&ctx.repo.worktree_root, dir));
         let prefix = dir
             .strip_prefix(&ctx.repo.worktree_root)
             .unwrap_or(Path::new(""));
@@ -81,12 +84,7 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
             }
         }
         for step in &steps.run {
-            let marker = if step.inputs().is_empty() {
-                "always runs".to_string()
-            } else {
-                format!("skipped when unchanged: {}", step.inputs().join(", "))
-            };
-            println!("  run   {}   ({marker})", step.command());
+            print_step(step);
         }
     }
 
@@ -233,6 +231,19 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
         println!("{}. {}", position + 1, ctx.nodes[index].qual());
     }
 
+    if targets.iter().any(|(_, _, steps)| !steps.after.is_empty()) {
+        println!("\n# after (once every service above is healthy)");
+        for (dir, _app, steps) in &targets {
+            if steps.after.is_empty() {
+                continue;
+            }
+            println!("({})", display_relative(&ctx.repo.worktree_root, dir));
+            for step in &steps.after {
+                print_step(step);
+            }
+        }
+    }
+
     println!("\n# would also");
     println!("- write {}/env", ctx.runtime_dir.display());
     println!(
@@ -240,6 +251,16 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
         ctx.paths.state_dir.display()
     );
     Ok(())
+}
+
+/// One bootstrap step in the plan, with what decides whether it runs.
+fn print_step(step: &RunStep) {
+    let marker = if step.inputs().is_empty() {
+        "always runs".to_string()
+    } else {
+        format!("skipped when unchanged: {}", step.inputs().join(", "))
+    };
+    println!("  run   {}   ({marker})", step.command());
 }
 
 fn display_relative(root: &Path, path: &Path) -> String {

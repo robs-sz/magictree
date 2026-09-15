@@ -166,7 +166,7 @@ reads and drives the components.
 | `declined` | root only | The options those answers turned down, so a new one is asked about instead of assumed. Written by `init`; the runtime never reads it. |
 | `[workspace] apps` | root only | Relative directories of the apps this repository contains. |
 | `[env]` | no | `KEY = "value"`, layered under the values magictree computes. |
-| `[bootstrap]` | no | Setup that runs before services start. |
+| `[bootstrap]` | no | Steps that run around `up`: `sync` and `run` before services start, `after` once they are up. |
 | `[[services]]` | no | Host processes and compose services. |
 | `[jobs.<id>]` | no | One-shot commands. |
 
@@ -247,6 +247,15 @@ a port only when the host needs to reach it.
 worktree is missing them. `run` is a list of shell commands: a bare string, or
 `{ command = "pnpm prisma generate", inputs = ["prisma/schema.prisma"] }`, whose `inputs` skip
 the step while those files are unchanged since its last successful run.
+
+`after` takes the same list, and runs it once every service the `up` selected is healthy and
+every `up` job has finished: a seed, a smoke test, a browser, a webhook registration, anything
+that needs the stack it just started. Steps run in the declaring manifest's directory with the
+resolved ports and `[env]`, and `inputs` skips a step the same way. A step without `inputs` runs
+on every `up`, so its command must be idempotent. Since the URLs are printed before `after`
+runs, a step that fails still leaves the running stack and its addresses on screen. A
+`when = "up"` job is the wrong tool for this: it runs as soon as its own `needs` are healthy,
+which is early in a partial `up`.
 
 Both `sync` paths and `inputs` are relative to the manifest that declares them, matching the
 directory its commands run in: an app manifest's `sync = ["node_modules"]` links the app's own

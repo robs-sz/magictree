@@ -321,6 +321,73 @@ health = { http = "/", timeout = 30 }
 }
 
 #[test]
+fn an_after_step_runs_once_the_whole_stack_is_up() {
+    // A `when = "up"` job runs as soon as its own `needs` are healthy, which is
+    // too early for a script that needs the stack it just started. `after` runs
+    // once every selected service is healthy.
+    if !have("python3", &["-c", "pass"]) {
+        eprintln!("skipping: python3 is unavailable for a listener fixture");
+        return;
+    }
+    let fixture = Fixture::new();
+    let reached = fixture.state_dir().join("reached.txt");
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"
+version = 1
+
+[bootstrap]
+after = [
+  "python3 -c \"import os, socket; [socket.create_connection(('127.0.0.1', int(os.environ[name]))) for name in ('FIRST_PORT', 'SECOND_PORT')]\"",
+  "echo \"$FIRST_PORT $SECOND_PORT\" > '{reached}'",
+]
+
+[[services]]
+id = "first"
+command = "python3 -m http.server $FIRST_PORT --bind 127.0.0.1"
+port = {{ env = "FIRST_PORT" }}
+health = {{ http = "/", timeout = 30 }}
+
+[[services]]
+id = "second"
+command = "python3 -m http.server $SECOND_PORT --bind 127.0.0.1"
+port = {{ env = "SECOND_PORT" }}
+needs = ["first"]
+health = {{ http = "/", timeout = 30 }}
+"#,
+            reached = reached.display()
+        ),
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let plan = run(&["--dry-run", "up"], fixture.path(), &state);
+    assert!(plan.ok(), "{}", plan.combined());
+    assert!(
+        plan.stdout.contains("# after"),
+        "the plan has to name the after phase:\n{}",
+        plan.stdout
+    );
+    assert!(
+        plan.stdout.contains("reached.txt"),
+        "the plan has to list the after steps:\n{}",
+        plan.stdout
+    );
+
+    let up = run(&["up"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    // The first step only exits zero if both ports answered, so the second one
+    // leaves the marker behind only when every service was up before it ran.
+    assert!(
+        reached.exists(),
+        "an after step must see the whole stack:\n{}",
+        up.combined()
+    );
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
 fn the_compose_variable_for_a_published_port_is_injected() {
     // Renders the compose configuration the way magictree would run it, so the
     // published port and the file's own derived values agree.

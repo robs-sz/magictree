@@ -544,6 +544,9 @@ impl Ctx {
         out
     }
 
+    /// The bootstrap steps of every manifest the selection touches, workspace
+    /// first. `sync` and `run` belong to the start, `after` to once the stack
+    /// is healthy; both phases run in this order.
     pub fn bootstrap_targets(
         &self,
         selection: &[usize],
@@ -552,7 +555,7 @@ impl Ctx {
         let mut targets = Vec::new();
         if !self.loaded.root_is_app {
             let bootstrap = self.loaded.workspace.bootstrap.clone();
-            if !bootstrap.sync.is_empty() || !bootstrap.run.is_empty() {
+            if !bootstrap.is_empty() {
                 seen.insert(self.loaded.workspace_dir.clone());
                 targets.push((self.loaded.workspace_dir.clone(), None, bootstrap));
             }
@@ -569,7 +572,7 @@ impl Ctx {
                 continue;
             }
             let bootstrap = app.manifest.bootstrap.clone();
-            if bootstrap.sync.is_empty() && bootstrap.run.is_empty() {
+            if bootstrap.is_empty() {
                 continue;
             }
             if seen.insert(app.dir.clone()) {

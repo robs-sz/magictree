@@ -342,12 +342,19 @@ pub fn compare(report: &Report, loaded: &Loaded) -> Vec<Drift> {
             &loaded.workspace,
         )))
     {
-        for step in &app.1.bootstrap.run {
+        for (phase, step) in app
+            .1
+            .bootstrap
+            .run
+            .iter()
+            .map(|step| ("bootstrap", step))
+            .chain(app.1.bootstrap.after.iter().map(|step| ("after", step)))
+        {
             for input in step.inputs() {
                 if !app.0.join(input).exists() {
                     drift.push(Drift::new(
                         format!(
-                            "bootstrap input '{input}' for `{}` does not exist",
+                            "{phase} input '{input}' for `{}` does not exist",
                             step.command()
                         ),
                         Some(

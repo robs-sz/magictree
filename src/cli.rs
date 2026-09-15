@@ -848,7 +848,8 @@ fn cmd_up(args: UpArgs, dry_run: bool) -> Result<()> {
 }
 
 /// The idempotent core: allocate ports, materialise env, bootstrap, then start
-/// services in dependency order, waiting for each to become healthy.
+/// services in dependency order, waiting for each to become healthy, and finish
+/// with the manifest's `after` steps.
 fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
     // Every service gets an assignment, not just the selected ones: a later
     // partial `up` still has to write an override for its dependencies, and a
@@ -881,7 +882,9 @@ fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
         }
         if !steps.run.is_empty() {
             let env = ctx.build_env(app.as_deref(), &assignment)?;
-            for message in bootstrap::run_steps(&ctx.runtime_dir, &dir, &steps.run, &env.vars)? {
+            for message in
+                bootstrap::run_steps(&ctx.runtime_dir, &dir, "bootstrap", &steps.run, &env.vars)?
+            {
                 println!("{message}");
             }
         }
@@ -980,6 +983,22 @@ fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
     }
 
     print_summary(ctx, selection, &assignment);
+
+    // `after` steps run once every selected service is healthy and every `up`
+    // job has finished. They come last so a failure still leaves the URLs on
+    // screen: the stack is up, and the failing script is the only thing wrong.
+    for (dir, app, steps) in ctx.bootstrap_targets(selection) {
+        if steps.after.is_empty() {
+            continue;
+        }
+        let env = ctx.build_env(app.as_deref(), &assignment)?;
+        for message in
+            bootstrap::run_steps(&ctx.runtime_dir, &dir, "after", &steps.after, &env.vars)?
+        {
+            println!("{message}");
+        }
+    }
+
     Ok(assignment)
 }
 

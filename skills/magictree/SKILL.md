@@ -88,7 +88,7 @@ that no manifest manages (the command still succeeds).
 ## Core loop
 
 ```bash
-magictree up            # allocate ports, bootstrap, start services, wait for health
+magictree up            # allocate ports, bootstrap, start services, wait for health, run `after`
 magictree status        # what is running, on which port
 magictree ports         # the port assignment as URLs
 magictree logs web -f   # follow one service's output
@@ -192,6 +192,7 @@ sync = ["node_modules", ".generated"]        # link from the main checkout when 
 run = [
   { command = "pnpm install", inputs = ["pnpm-lock.yaml"] },
 ]
+after = ["pnpm db:seed"]                     # once every selected service is healthy
 
 [[services]]
 id = "web"
@@ -225,7 +226,10 @@ Rules that matter:
   same directory its commands run in: `inputs = ["uv.lock"]` in `api/magictree.toml` means
   `api/uv.lock`. Only a root manifest's paths are relative to the repository root.
 - `[jobs.<id>]` with `when = "up"` runs once after its `needs` are healthy; `when = "manual"`
-  never runs automatically.
+  never runs automatically. A script that needs the whole stack (seed, smoke test, browser)
+  belongs in `[bootstrap] after`, which runs once every selected service is healthy:
+  `when = "up"` only waits for its own `needs`. Both take the same step shape, `inputs`
+  included.
 - A one-shot compose initialiser (provisioning, migrations) needs `wait = "exit"`, so
   `up` waits for it to finish successfully instead of moving on while it runs.
 - Services that derive their own URLs from a port (`${WT_PORT_AUTH}` in another
@@ -258,7 +262,8 @@ Common causes:
   prints the exact `docker compose -p <project> logs <service>` command to use instead. A
   one-shot initialiser that exits zero is treated as finished, not failed.
 - **Bootstrap failed.** The failing command is printed. Re-run `magictree up` after fixing
-  the cause; already-satisfied steps are cached.
+  the cause; already-satisfied steps are cached. An `after` step that fails says so and leaves
+  the stack running, with its URLs already printed: fix the script and run `up` again.
 - **Dependencies are missing.** `needs` may reference a service that does not exist, or the
   manifest predates a renamed service. Read the error; it names the service and dependency.
   `magictree doctor` finds the same class of problem before you hit it at runtime.

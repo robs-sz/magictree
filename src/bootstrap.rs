@@ -66,13 +66,18 @@ pub fn sync_files(
     Ok(messages)
 }
 
-/// Run bootstrap commands, skipping steps whose declared inputs are unchanged.
-/// Inputs are relative to the manifest that declares them, matching the
-/// command's working directory and `doctor`'s existence check: an app
+/// Run one phase's bootstrap commands, skipping steps whose declared inputs are
+/// unchanged. Inputs are relative to the manifest that declares them, matching
+/// the command's working directory and `doctor`'s existence check: an app
 /// manifest's `inputs = ["uv.lock"]` means `<app>/uv.lock`.
+///
+/// `phase` names the phase in messages only: the cache entry belongs to the
+/// manifest that declared the command and to the command itself, so the same
+/// command in `run` and in `after` means the same thing by `inputs`.
 pub fn run_steps(
     runtime_dir: &Path,
     manifest_dir: &Path,
+    phase: &str,
     steps: &[crate::manifest::RunStep],
     env: &BTreeMap<String, String>,
 ) -> Result<Vec<String>> {
@@ -90,11 +95,11 @@ pub fn run_steps(
                 continue;
             }
             run::run_once(command, manifest_dir, env)
-                .with_context(|| format!("bootstrap step '{command}' failed"))?;
+                .with_context(|| format!("{phase} step '{command}' failed"))?;
             state.bootstrap.insert(key, digest);
         } else {
             run::run_once(command, manifest_dir, env)
-                .with_context(|| format!("bootstrap step '{command}' failed"))?;
+                .with_context(|| format!("{phase} step '{command}' failed"))?;
         }
         messages.push(format!("run {command}: ok"));
     }

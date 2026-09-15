@@ -273,6 +273,37 @@ port = { env = "PORT" }
     );
 }
 
+#[test]
+fn an_after_input_that_no_longer_exists_is_drift() {
+    // The same failure as a `run` step's: the cache can never hit, so the step
+    // runs on every `up` without saying why.
+    let fixture = repo();
+    fixture.write(
+        "apps/web/magictree.toml",
+        r#"
+version = 1
+[app]
+id = "web"
+
+[bootstrap]
+after = [{ command = "pnpm db:seed", inputs = ["seed.sql", "gone.sql"] }]
+
+[[services]]
+id = "web"
+target = { kind = "pnpm", script = "dev" }
+port = { env = "PORT" }
+"#,
+    );
+
+    let summaries = drift_summaries(&fixture);
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.contains("after input 'gone.sql'")),
+        "an after step's inputs need the same existence check: {summaries:?}"
+    );
+}
+
 /// A repository whose dev script pins the port it listens on, and whose
 /// manifest hands it a variable a compose service also claims.
 fn pinned_repo() -> Fixture {

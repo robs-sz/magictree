@@ -41,6 +41,18 @@ pub struct Bootstrap {
     pub sync: Vec<String>,
     #[serde(default)]
     pub run: Vec<RunStep>,
+    /// Steps that run once every service the `up` selected is healthy, so a
+    /// script can use the stack it just started instead of racing it.
+    #[serde(default)]
+    pub after: Vec<RunStep>,
+}
+
+impl Bootstrap {
+    /// True when this manifest has no steps around `up`, and so needs no
+    /// bootstrap target of its own.
+    pub fn is_empty(&self) -> bool {
+        self.sync.is_empty() && self.run.is_empty() && self.after.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
