@@ -166,8 +166,10 @@ magictree env --explain        # which layer set each value
 ```
 
 Values come from three layers, lowest first: repository `[env]`, app `[env]`, then values
-magictree computes (slugs, ports). Ports appear as `MAGICTREE_PORT_<name>`, and each host
-service additionally receives the variable its manifest names in `port.env`.
+magictree computes (slugs, ports). Ports appear as `MAGICTREE_PORT_<name>`, and every
+variable a service names in `port.env` is a computed value too: the whole stack's set reaches
+every launched process and `magictree env`, so a host tool reads a peer service's declared
+port without restating it in `[env]`. Restating one in `[env]` is an error, not an override.
 
 Never edit or overwrite repository `.env` files. magictree injects the environment into the
 processes it launches; the repository's own files are left alone.
@@ -222,9 +224,10 @@ Rules that matter:
   `up` waits for it to finish successfully instead of moving on while it runs.
 - Services that derive their own URLs from a port (`${WT_PORT_ZITADEL}` in another
   service's environment, or a callback URL registered at startup) need that variable
-  set for the whole stack. Ports declare it with `port.env`, and cross-service
-  references go in `[env]`, where `${MAGICTREE_PORT_<service>}` resolves to the port
-  this worktree published.
+  set for the whole stack. Declare it with `port.env`; it is then in every launched
+  process and in `magictree env`, so a host CLI reads a peer's port without a `[env]`
+  restatement. Other cross-service values go in `[env]`, where
+  `${MAGICTREE_PORT_<service>}` resolves to the port this worktree published.
 - `[workspace] apps = [...]` at the repository root lists apps; each app has its own
   `magictree.toml` with bare service ids.
 

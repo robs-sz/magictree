@@ -442,6 +442,85 @@ ports = [
 }
 
 #[test]
+fn env_publishes_every_declared_port_variable() {
+    // `magictree env --export` is how a host command adopts a worktree's
+    // environment. It must carry the whole stack's declared `port.env` values,
+    // not just the ones the invoking service happens to own, or a host tool
+    // silently falls back to a port that belongs to another worktree.
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[[services]]
+id = "api"
+command = "sleep 300"
+port = { env = "WT_PORT_API" }
+
+[[services]]
+id = "seed"
+command = "sleep 300"
+port = { env = "WT_PORT_SEED" }
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let ports = run(&["ports"], fixture.path(), &state);
+    assert!(ports.ok(), "{}", ports.combined());
+    let allocated = |name: &str| -> String {
+        ports
+            .stdout
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("no port line for {name}:\n{}", ports.stdout))
+            .split_whitespace()
+            .nth(1)
+            .expect("port column")
+            .to_string()
+    };
+
+    let env = run(&["env", "--export"], fixture.path(), &state);
+    assert!(env.ok(), "{}", env.combined());
+    assert!(
+        env.stdout
+            .contains(&format!("export WT_PORT_API={}", allocated("api"))),
+        "the declaring service's variable is exported:\n{}",
+        env.stdout
+    );
+    assert!(
+        env.stdout
+            .contains(&format!("export WT_PORT_SEED={}", allocated("seed"))),
+        "a peer-declared port variable must reach `env`:\n{}",
+        env.stdout
+    );
+
+    // Restating a computed port variable in `[env]` is a conflict, not a
+    // silent override: magictree already publishes it.
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[env]
+WT_PORT_SEED = "${MAGICTREE_PORT_seed}"
+
+[[services]]
+id = "seed"
+command = "sleep 300"
+port = { env = "WT_PORT_SEED" }
+"#,
+    );
+    let duplicate = run(&["env"], fixture.path(), &state);
+    assert!(
+        !duplicate.ok() && duplicate.combined().contains("WT_PORT_SEED"),
+        "a restated port variable must fail loudly:\n{}",
+        duplicate.combined()
+    );
+}
+
+#[test]
 fn health_check_accepts_a_service_bound_only_to_ipv6() {
     // A dev server asked to listen on `localhost` may bind ::1 only, which is
     // what Vite does. Probing 127.0.0.1 alone reported it as unreachable.

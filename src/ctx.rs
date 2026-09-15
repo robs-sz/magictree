@@ -20,14 +20,6 @@ static EMPTY_ENV: BTreeMap<String, String> = BTreeMap::new();
 const PLACEHOLDER_PORT: u16 = 0;
 const PLACEHOLDER: &str = "<allocated>";
 
-fn render_placeholder(port: u16) -> String {
-    if port == PLACEHOLDER_PORT {
-        PLACEHOLDER.to_string()
-    } else {
-        port.to_string()
-    }
-}
-
 /// Where runtime state lived before it moved into magictree's own state dir.
 /// Kept only so a stack started before the upgrade stays stoppable.
 pub fn legacy_runtime_dir(repo: &Repo) -> PathBuf {
@@ -335,6 +327,15 @@ impl Ctx {
                 }
             }
         }
+        // A declared `port.env` names a variable the stack publishes: compose
+        // interpolates it wherever it is declared and host tooling reads it. So
+        // the whole stack's set belongs in the computed layer, where it reaches
+        // `magictree env`, `--export`, `--explain` and every launched process.
+        for node in &self.nodes {
+            for (variable, port) in self.declared_port_variables(node, assignment) {
+                vars.insert(variable, port.to_string());
+            }
+        }
         vars
     }
 
@@ -356,22 +357,9 @@ impl Ctx {
         node: &Node,
         assignment: &Assignment,
     ) -> Result<BTreeMap<String, String>> {
-        let plan = self.build_env(node.app.as_deref(), assignment)?;
-        let mut vars = plan.vars;
-        let compose = node.runtime() == Some(Runtime::Compose);
-
-        for other in &self.nodes {
-            // A compose file interpolates variables wherever they are declared.
-            // Starting one service therefore needs the whole stack's port
-            // variables, not only that service's own.
-            if !compose && other.qual() != node.qual() {
-                continue;
-            }
-            for (variable, port) in self.declared_port_variables(other, assignment) {
-                vars.insert(variable, port.to_string());
-            }
-        }
-        Ok(vars)
+        // `computed_env` already carries every declared `port.env` in the stack,
+        // so a node's environment is exactly the layered plan.
+        Ok(self.build_env(node.app.as_deref(), assignment)?.vars)
     }
 
     /// Every `port.env` a service declares, paired with its allocated port.
@@ -672,33 +660,30 @@ impl Ctx {
     /// allocated port shown as a placeholder so nothing is claimed.
     pub fn preview_env(&self) -> Result<EnvPlan> {
         let assignment = self.preview_assignment();
-        let mut plan = self.build_env(self.loaded.current_app.as_deref(), &assignment)?;
-        for (key, value) in plan.vars.iter_mut() {
-            if key.starts_with("MAGICTREE_PORT_") && *value == PLACEHOLDER_PORT.to_string() {
-                *value = PLACEHOLDER.to_string();
-            }
-        }
-        for node in &self.nodes {
-            if let Some(variable) = node
-                .service()
-                .and_then(|service| service.port.as_ref())
-                .and_then(|port| port.env.clone())
-            {
-                let value = assignment
-                    .ports
-                    .get(&node.qual())
-                    .map(|port| render_placeholder(*port))
-                    .unwrap_or_else(|| PLACEHOLDER.to_string());
-                plan.vars.entry(variable).or_insert(value);
-            }
-        }
-        Ok(plan)
+        let plan = self.build_env(self.loaded.current_app.as_deref(), &assignment)?;
+        Ok(self.with_placeholders(plan))
     }
 
-    /// Replace the dry-run sentinel with a readable placeholder.
+    /// Names of every variable a declared `port.env` publishes in this stack.
+    fn declared_port_variable_names(&self) -> BTreeSet<String> {
+        self.nodes
+            .iter()
+            .filter_map(|node| node.service())
+            .flat_map(|service| service.ports())
+            .filter_map(|port| port.env)
+            .collect()
+    }
+
+    /// Replace the dry-run sentinel with a readable placeholder. Every port
+    /// shows as a placeholder, whether it arrives as `MAGICTREE_PORT_<name>` or
+    /// under the variable a service declared in `port.env`.
     pub fn with_placeholders(&self, mut plan: EnvPlan) -> EnvPlan {
+        let declared = self.declared_port_variable_names();
         for (key, value) in plan.vars.iter_mut() {
-            if key.starts_with("MAGICTREE_PORT_") && *value == PLACEHOLDER_PORT.to_string() {
+            if *value != PLACEHOLDER_PORT.to_string() {
+                continue;
+            }
+            if key.starts_with("MAGICTREE_PORT_") || declared.contains(key) {
                 *value = PLACEHOLDER.to_string();
             }
         }

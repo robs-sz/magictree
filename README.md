@@ -159,10 +159,15 @@ reads and drives the components.
 | `[jobs.<id>]` | no | One-shot commands. |
 
 `[env]` values may interpolate `${MAGICTREE_SLUG}` and `${MAGICTREE_PORT_<...>}`, but not
-redefine the keys magictree owns: `MAGICTREE_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`.
+redefine the keys magictree owns: `MAGICTREE_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_FILE`,
+and every variable a service names in `port.env`.
 Layers, lowest first: computed values (slug, worktree paths, ports), workspace `[env]`, app
 `[env]`. A port variable is `MAGICTREE_PORT_<service>`, prefixed with `<app>_` for an app
 service and suffixed with `_<port>` when a service has several (`-` and `:` become `_`).
+Every declared `port.env` is a computed value too: the whole stack's set reaches every
+launched process and `magictree env`, `--export` and `--explain`, because compose
+interpolates a variable wherever it is declared and host tooling reads it wherever it runs.
+A variable two services declare resolves last-wins in manifest order; name them distinctly.
 
 ### Services
 
@@ -204,7 +209,7 @@ where each needs its own `name`.
 |---|---|
 | `name` | Identifies the port inside its service; defaults to the service id. Must be distinct when a service declares more than one. |
 | `target` | Container-side port published on the allocated host port. A compose service that publishes anything must set it. |
-| `env` | Variable receiving the allocated port: for a host process the one it reads, for a compose service the one its compose file interpolates. |
+| `env` | Variable receiving the allocated port: for a host process the one it reads, for a compose service the one its compose file interpolates. Published for the whole stack, so any process may read it. Reserved magictree names are rejected. |
 | `prefer` | Use this port when it is free, otherwise allocate one. |
 | `require` | Fail loudly when this port is unavailable. |
 

@@ -594,6 +594,15 @@ fn validate_manifest(manifest: &Manifest, scope: &str) -> Result<()> {
                     service.id
                 );
             }
+            if let Some(variable) = &port.env {
+                if is_reserved_env(variable) {
+                    bail!(
+                        "{scope}: service '{}' port '{name}' names reserved environment \
+                         variable '{variable}'",
+                        service.id
+                    );
+                }
+            }
         }
     }
     if let Some(id) = service_job_overlap(manifest).first() {

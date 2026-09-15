@@ -151,6 +151,10 @@ fn validation_rejects_incomplete_services() {
             "both prefer and require",
             "version = 1\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 1\"\nport = { prefer = 3000, require = 3001 }\n",
         ),
+        (
+            "reserved port.env variable",
+            "version = 1\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 1\"\nport = { env = \"MAGICTREE_SLUG\" }\n",
+        ),
     ];
 
     for (label, contents) in cases {
@@ -354,10 +358,10 @@ wait = "exit"
 }
 
 #[test]
-fn compose_env_carries_every_port_variable_in_the_stack() {
-    // A compose file interpolates a variable wherever it is declared, so
-    // starting one service needs the whole stack's port variables: stack-init
-    // derives the login URLs from ports owned by other services.
+fn every_process_carries_every_declared_port_variable() {
+    // A declared `port.env` names a variable the whole stack publishes: compose
+    // interpolates it wherever it is declared, and host tooling reads it. So
+    // every process — and `magictree env` — sees the stack's whole set.
     use magictree::manifest::Loaded;
     use magictree::paths::Paths;
     use magictree::ports::Assignment;
@@ -445,16 +449,22 @@ wait = "exit"
         Some("24284")
     );
 
-    // A host service keeps to its own declared variable.
+    // A host service owns its own variable and also sees its peers', so host
+    // tooling cannot silently fall back to a port the stack never published.
     let web = all
         .iter()
         .find(|n| n.id == "web" && n.app.is_some())
         .expect("web");
     let web_env = ctx.node_env(web, &assignment).expect("env");
     assert_eq!(web_env.get("WEB_PORT").map(String::as_str), Some("24286"));
-    assert!(
-        !web_env.contains_key("WT_PORT_ZITADEL"),
-        "a host process does not need other services' variables: {web_env:?}"
+    assert_eq!(
+        web_env.get("WT_PORT_ZITADEL").map(String::as_str),
+        Some("24283"),
+        "a host process must see the stack's declared port variables: {web_env:?}"
+    );
+    assert_eq!(
+        web_env.get("WT_PORT_ZITADEL_LOGIN").map(String::as_str),
+        Some("24284")
     );
 }
 
