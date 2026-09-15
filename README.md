@@ -1,16 +1,14 @@
-<div align="center"><pre>
-                                   /33
-                                  |__/
- /333333/3333   /333333   /333333  /33  /3333333
-| 33_  33_  33 |____  33 /33__  33| 33 /33_____/
-| 33 \ 33 \ 33  /3333333| 33  \ 33| 33| 33
-| 33 | 33 | 33 /33__  33| 33  | 33| 33| 33
-| 33 | 33 | 33|  3333333|  3333333| 33|  3333333
-|__/ |__/ |__/ \_______/ \____  33|__/ \_______/
-                         /33  \ 33
-                        |  333333/
-                         \______/
-</pre></div>
+<div align="center" style="background:transparent"><samp>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/33&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|__/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+&nbsp;/333333/3333&nbsp;&nbsp;&nbsp;/333333&nbsp;&nbsp;&nbsp;/333333&nbsp;&nbsp;/33&nbsp;&nbsp;/3333333<br>
+|&nbsp;33_&nbsp;&nbsp;33_&nbsp;&nbsp;33&nbsp;|____&nbsp;&nbsp;33&nbsp;/33__&nbsp;&nbsp;33|&nbsp;33&nbsp;/33_____/<br>
+|&nbsp;33&nbsp;\&nbsp;33&nbsp;\&nbsp;33&nbsp;&nbsp;/3333333|&nbsp;33&nbsp;&nbsp;\&nbsp;33|&nbsp;33|&nbsp;33&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+|&nbsp;33&nbsp;|&nbsp;33&nbsp;|&nbsp;33&nbsp;/33__&nbsp;&nbsp;33|&nbsp;33&nbsp;&nbsp;|&nbsp;33|&nbsp;33|&nbsp;33&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+|&nbsp;33&nbsp;|&nbsp;33&nbsp;|&nbsp;33|&nbsp;&nbsp;3333333|&nbsp;&nbsp;3333333|&nbsp;33|&nbsp;&nbsp;3333333<br>
+|__/&nbsp;|__/&nbsp;|__/&nbsp;\_______/&nbsp;\____&nbsp;&nbsp;33|__/&nbsp;\_______/<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;/33&nbsp;&nbsp;\&nbsp;33&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;333333/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;\______/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</samp></div>
 
 # magictree
 
