@@ -451,10 +451,7 @@ wait = "exit"
         .find(|n| n.id == "web" && n.app.is_some())
         .expect("web");
     let web_env = ctx.node_env(web, &assignment).expect("env");
-    assert_eq!(
-        web_env.get("WEB_PORT").map(String::as_str),
-        Some("24286")
-    );
+    assert_eq!(web_env.get("WEB_PORT").map(String::as_str), Some("24286"));
     assert!(
         !web_env.contains_key("WT_PORT_ZITADEL"),
         "a host process does not need other services' variables: {web_env:?}"
