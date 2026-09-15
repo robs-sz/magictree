@@ -40,17 +40,14 @@ fn declared_layers_cannot_shadow_computed_values() {
 fn values_interpolate_from_computed_and_earlier_values() {
     let plan = build(
         map(&[("MAGICTREE_PORT_api", "21001")]),
-        &map(&[(
-            "DATABASE_URL",
-            "postgres://localhost:${MAGICTREE_PORT_api}/app",
-        )]),
+        &map(&[("DATABASE_URL", "db://localhost:${MAGICTREE_PORT_api}/app")]),
         &map(&[("API_BASE", "http://localhost:${MAGICTREE_PORT_api}")]),
     )
     .expect("build");
 
     assert_eq!(
         plan.vars.get("DATABASE_URL"),
-        Some(&"postgres://localhost:21001/app".to_string())
+        Some(&"db://localhost:21001/app".to_string())
     );
     assert_eq!(
         plan.vars.get("API_BASE"),

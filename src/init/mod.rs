@@ -669,7 +669,7 @@ fn is_initializer(name: &str) -> bool {
 }
 
 /// A readable port name derived from the variable the compose file uses, so
-/// multi-port services get names like `minio` and `minio_console` rather than
+/// multi-port services get names like `objects` and `objects_console` rather than
 /// positional ones.
 fn port_name(variable: Option<&str>, position: usize) -> String {
     let Some(variable) = variable else {
@@ -745,7 +745,7 @@ fn compose_services(
         );
         if exposed.contains(name) {
             // The compose file derives its own URLs from the same variables that
-            // set the published port (`${WT_PORT_ZITADEL:-8080}`). Publishing on
+            // set the published port (`${WT_PORT_AUTH:-8080}`). Publishing on
             // an allocated port without telling compose makes those URLs point
             // at the default, so the variable is part of the port declaration.
             let mappings: Vec<(u16, Option<String>)> = fact

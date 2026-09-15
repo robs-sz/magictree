@@ -41,8 +41,8 @@ even after the repository gains what it declined.
 
 ```toml
 # Recorded by `magictree init`; replayed so only new questions are asked.
-answers = { "web.run" = "pnpm:dev", "web.storybook" = "skip", "compose.shared" = ["postgres"] }
-declined = { "compose.shared" = ["mailpit"] }
+answers = { "web.run" = "pnpm:dev", "web.storybook" = "skip", "compose.shared" = ["db"] }
+declined = { "compose.shared" = ["mail"] }
 ```
 
 A question that offers several things is answered one option at a time, so what the answer
@@ -281,7 +281,7 @@ magictree --dry-run up      # the jobs and the start order, without starting any
 
 ### Monorepo manifests
 
-The root manifest holds `[workspace] apps`, the services every app shares (`db`, `redis`), and
+The root manifest holds `[workspace] apps`, the services every app shares (`db`, `cache`), and
 workspace-level jobs; each directory it lists has its own `magictree.toml` with bare service
 ids. Services and jobs are addressed as `app:id` (`web:web`, `api:migrate`), and
 workspace-level ones by their bare id (`db`); a `needs` entry resolves inside its own app

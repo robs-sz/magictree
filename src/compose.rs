@@ -217,10 +217,10 @@ mod tests {
         // `docker compose ps --format json` may emit a bare object per line or
         // an array; both are accepted, and ExitCode decides whether an exited
         // container is an initialiser that finished or a failure.
-        let line = r#"{"Service":"minio-init","State":"exited","ExitCode":0,"Health":""}"#;
+        let line = r#"{"Service":"objects-init","State":"exited","ExitCode":0,"Health":""}"#;
         let states = parse_ps(line).expect("parse");
         assert_eq!(states.len(), 1);
-        assert_eq!(states[0].service, "minio-init");
+        assert_eq!(states[0].service, "objects-init");
         assert_eq!(states[0].exit_code, Some(0));
 
         let array = r#"[{"Service":"api","State":"exited","ExitCode":2},{"Service":"db","State":"running","Health":"healthy"}]"#;

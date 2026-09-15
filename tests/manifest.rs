@@ -222,7 +222,10 @@ command = "sleep 100"
 needs = ["api:api"]
 "#,
     );
-    fixture.write("compose.yml", "services:\n  db:\n    image: postgres:18\n");
+    fixture.write(
+        "compose.yml",
+        "services:\n  db:\n    image: example/db:18\n",
+    );
     fixture.git_repo();
 
     let loaded = Loaded::load(&fixture.join("apps/web")).expect("load from inside an app");
@@ -376,12 +379,12 @@ version = 1
 apps = ["apps/web"]
 
 [[services]]
-id = "zitadel"
+id = "auth"
 runtime = "compose"
-compose = { file = "compose.yml", service = "zitadel" }
+compose = { file = "compose.yml", service = "auth" }
 ports = [
-  { name = "zitadel", target = 8080, env = "WT_PORT_ZITADEL" },
-  { name = "zitadel_login", target = 3000, env = "WT_PORT_ZITADEL_LOGIN" },
+  { name = "auth", target = 8080, env = "WT_PORT_AUTH" },
+  { name = "auth_login", target = 3000, env = "WT_PORT_AUTH_LOGIN" },
 ]
 
 [[services]]
@@ -403,8 +406,8 @@ wait = "exit"
     let mut ports = BTreeMap::new();
     // The service's first port keeps the plain name; later ones are qualified,
     // matching what `magictree ports` reports.
-    ports.insert("zitadel".to_string(), 24283u16);
-    ports.insert("zitadel:zitadel_login".to_string(), 24284u16);
+    ports.insert("auth".to_string(), 24283u16);
+    ports.insert("auth:auth_login".to_string(), 24284u16);
     ports.insert("web:web".to_string(), 24286u16);
     let assignment = Assignment {
         version: magictree::ports::ASSIGNMENT_VERSION,
@@ -440,12 +443,12 @@ wait = "exit"
     let env = ctx.node_env(stack_init, &assignment).expect("env");
 
     assert_eq!(
-        env.get("WT_PORT_ZITADEL").map(String::as_str),
+        env.get("WT_PORT_AUTH").map(String::as_str),
         Some("24283"),
         "a compose service must see ports declared by other services: {env:?}"
     );
     assert_eq!(
-        env.get("WT_PORT_ZITADEL_LOGIN").map(String::as_str),
+        env.get("WT_PORT_AUTH_LOGIN").map(String::as_str),
         Some("24284")
     );
 
@@ -458,12 +461,12 @@ wait = "exit"
     let web_env = ctx.node_env(web, &assignment).expect("env");
     assert_eq!(web_env.get("WEB_PORT").map(String::as_str), Some("24286"));
     assert_eq!(
-        web_env.get("WT_PORT_ZITADEL").map(String::as_str),
+        web_env.get("WT_PORT_AUTH").map(String::as_str),
         Some("24283"),
         "a host process must see the stack's declared port variables: {web_env:?}"
     );
     assert_eq!(
-        web_env.get("WT_PORT_ZITADEL_LOGIN").map(String::as_str),
+        web_env.get("WT_PORT_AUTH_LOGIN").map(String::as_str),
         Some("24284")
     );
 }

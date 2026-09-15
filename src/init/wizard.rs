@@ -303,12 +303,12 @@ mod tests {
     fn multi_choice_accepts_lists_and_keywords() {
         let question = unknown(
             UnknownKind::MultiChoice,
-            &["postgres", "redis", "worker"],
-            Some("postgres,redis"),
+            &["db", "cache", "worker"],
+            Some("db,cache"),
         );
         assert!(matches!(
             parse_answer(&question, "1,3").unwrap(),
-            Answer::Many(values) if values == vec!["postgres".to_string(), "worker".to_string()]
+            Answer::Many(values) if values == vec!["db".to_string(), "worker".to_string()]
         ));
         assert!(matches!(
             parse_answer(&question, "all").unwrap(),
@@ -321,7 +321,7 @@ mod tests {
         // Empty input takes the declared default, not every option.
         assert!(matches!(
             parse_answer(&question, "").unwrap(),
-            Answer::Many(values) if values == vec!["postgres".to_string(), "redis".to_string()]
+            Answer::Many(values) if values == vec!["db".to_string(), "cache".to_string()]
         ));
     }
 
@@ -448,15 +448,15 @@ mod tests {
         let report = test_report(vec![named(
             "compose.shared",
             UnknownKind::MultiChoice,
-            &["postgres", "redis", "mailpit"],
-            Some("postgres,redis,mailpit"),
+            &["db", "cache", "mail"],
+            Some("db,cache,mail"),
         )]);
         let recorded = Recorded {
             answers: BTreeMap::from([(
                 "compose.shared".to_string(),
-                Answer::Many(vec!["postgres".to_string(), "redis".to_string()]),
+                Answer::Many(vec!["db".to_string(), "cache".to_string()]),
             )]),
-            reopened: BTreeMap::from([("compose.shared".to_string(), vec!["mailpit".to_string()])]),
+            reopened: BTreeMap::from([("compose.shared".to_string(), vec!["mail".to_string()])]),
             ..Recorded::default()
         };
 
@@ -473,11 +473,11 @@ mod tests {
 
         let rendered = String::from_utf8_lossy(&output);
         assert!(
-            rendered.contains("3. mailpit (new)"),
+            rendered.contains("3. mail (new)"),
             "the option the answer never decided is marked: {rendered}"
         );
         assert!(
-            rendered.contains("1. postgres (default)"),
+            rendered.contains("1. db (default)"),
             "what was chosen is the default: {rendered}"
         );
         assert_eq!(

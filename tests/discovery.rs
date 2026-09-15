@@ -8,20 +8,20 @@ use support::Fixture;
 
 const COMPOSE: &str = r#"
 services:
-  postgres:
-    image: postgis/postgis:18
+  db:
+    image: example/db:18
     ports:
       - "${WT_PORT_DB:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready"]
-  redis:
-    image: redis:8
+      test: ["CMD-SHELL", "true"]
+  cache:
+    image: example/cache:8
     ports:
-      - "${WT_PORT_REDIS:-6379}:6379"
+      - "${WT_PORT_CACHE:-6379}:6379"
   worker:
     build: ./deployment/worker
     depends_on:
-      postgres:
+      db:
         condition: service_healthy
 "#;
 
@@ -40,7 +40,7 @@ fn monorepo() -> Fixture {
     );
     fixture.write("apps/api/uv.lock", "version = 1\n");
     fixture.write("justfile", "set shell := [\"bash\"]\n\ndev:\n  echo dev\n");
-    fixture.write(".env.example", "DATABASE_URL=\nREDIS_URL=\n");
+    fixture.write(".env.example", "DATABASE_URL=\nCACHE_URL=\n");
     fixture.git_repo();
     fixture
 }
@@ -77,16 +77,16 @@ fn extracts_compose_services_with_ports_and_dependencies() {
         .iter()
         .map(|service| service.name.as_str())
         .collect();
-    assert_eq!(names, vec!["postgres", "redis", "worker"]);
+    assert_eq!(names, vec!["cache", "db", "worker"]);
 
-    let postgres = services.iter().find(|s| s.name == "postgres").unwrap();
-    assert_eq!(postgres.ports, vec!["${WT_PORT_DB:-5432}:5432"]);
-    assert!(postgres.has_healthcheck);
-    assert!(!postgres.has_build);
+    let db = services.iter().find(|s| s.name == "db").unwrap();
+    assert_eq!(db.ports, vec!["${WT_PORT_DB:-5432}:5432"]);
+    assert!(db.has_healthcheck);
+    assert!(!db.has_build);
 
     let worker = services.iter().find(|s| s.name == "worker").unwrap();
     assert!(worker.has_build);
-    assert_eq!(worker.depends_on, vec!["postgres"]);
+    assert_eq!(worker.depends_on, vec!["db"]);
 
     assert!(*has_build, "at least one service builds from source");
 }
@@ -155,7 +155,7 @@ fn asks_about_what_it_cannot_know() {
     assert_eq!(shared.kind, UnknownKind::MultiChoice);
     assert_eq!(
         shared.default.as_deref(),
-        Some("postgres,redis,worker"),
+        Some("cache,db,worker"),
         "services built from source are part of the stack too"
     );
     assert!(shared.options.contains(&"worker".to_string()));
@@ -343,7 +343,10 @@ fn single_app_repository_needs_no_workspace_layer() {
         "package.json",
         r#"{"name":"solo","scripts":{"dev":"vite"}}"#,
     );
-    fixture.write("compose.yaml", "services:\n  db:\n    image: postgres:18\n");
+    fixture.write(
+        "compose.yaml",
+        "services:\n  db:\n    image: example/db:18\n",
+    );
     fixture.git_repo();
     let report = extract(fixture.path()).expect("extract");
 
@@ -381,7 +384,7 @@ fn compose_files_in_infra_directories_are_found() {
     let fixture = Fixture::new();
     fixture.write(
         "infra/compose.yml",
-        "services:\n  db:\n    image: postgres:18\n",
+        "services:\n  db:\n    image: example/db:18\n",
     );
     fixture.write("package.json", r#"{"name":"solo"}"#);
     fixture.git_repo();
@@ -400,7 +403,7 @@ fn a_compose_file_one_level_inside_infra_is_found() {
     let fixture = Fixture::new();
     fixture.write(
         "infra/local/docker-compose.yml",
-        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5433:5432\"\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5433:5432\"\n",
     );
     fixture.write("package.json", r#"{"name":"solo"}"#);
     fixture.git_repo();
@@ -415,7 +418,7 @@ fn a_compose_file_one_level_inside_infra_is_found() {
     let FactData::Compose { services, .. } = &compose.data else {
         panic!("expected compose data");
     };
-    assert_eq!(services[0].name, "postgres");
+    assert_eq!(services[0].name, "db");
 }
 
 #[test]

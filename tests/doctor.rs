@@ -12,7 +12,7 @@ fn repo() -> Fixture {
     fixture.write("pnpm-workspace.yaml", "packages:\n  - \"apps/*\"\n");
     fixture.write(
         "compose.yaml",
-        "services:\n  db:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5432:5432\"\n",
     );
     fixture.write(
         "apps/web/package.json",
@@ -71,20 +71,20 @@ fn an_unmanaged_compose_service_is_information_not_drift() {
     let fixture = repo();
     fixture.write(
         "compose.yaml",
-        "services:\n  db:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  mailpit:\n    image: axllent/mailpit\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5432:5432\"\n  mail:\n    image: example/mail:latest\n",
     );
 
     let report = extract(fixture.path()).expect("extract");
     let loaded = Loaded::load(fixture.path()).expect("load");
     let findings = compare(&report, &loaded);
 
-    let mailpit: Vec<&_> = findings
+    let mail: Vec<&_> = findings
         .iter()
-        .filter(|entry| entry.summary.contains("mailpit"))
+        .filter(|entry| entry.summary.contains("mail"))
         .collect();
-    assert_eq!(mailpit.len(), 1, "the new service is mentioned once");
+    assert_eq!(mail.len(), 1, "the new service is mentioned once");
     assert!(
-        !mailpit[0].is_drift(),
+        !mail[0].is_drift(),
         "an optional service is a valid choice, not breakage"
     );
     assert!(drift_summaries(&fixture).is_empty());
@@ -106,7 +106,10 @@ fn a_removed_script_is_drift() {
 #[test]
 fn a_compose_service_that_disappeared_is_drift() {
     let fixture = repo();
-    fixture.write("compose.yaml", "services:\n  cache:\n    image: redis:8\n");
+    fixture.write(
+        "compose.yaml",
+        "services:\n  cache:\n    image: example/cache:8\n",
+    );
 
     let summaries = drift_summaries(&fixture);
     assert!(
@@ -281,7 +284,7 @@ fn pinned_repo() -> Fixture {
     fixture.write("package-lock.json", "{}");
     fixture.write(
         "compose.yaml",
-        "services:\n  db:\n    image: postgres:18\n    ports:\n      - \"5433:5432\"\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5433:5432\"\n",
     );
     fixture.write(
         "magictree.toml",

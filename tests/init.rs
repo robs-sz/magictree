@@ -26,7 +26,7 @@ fn monorepo() -> Fixture {
     fixture.write("pnpm-workspace.yaml", "packages:\n  - \"apps/*\"\n");
     fixture.write(
         "compose.yaml",
-        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"${WT_PORT_DB:-5432}:5432\"\n  redis:\n    image: redis:8\n    ports:\n      - \"${WT_PORT_REDIS:-6379}:6379\"\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"${WT_PORT_DB:-5432}:5432\"\n  cache:\n    image: example/cache:8\n    ports:\n      - \"${WT_PORT_CACHE:-6379}:6379\"\n",
     );
     fixture.write(
         "apps/web/package.json",
@@ -126,7 +126,7 @@ fn generates_a_workspace_manifest_and_one_manifest_per_app() {
     assert!(workspace.contains("apps = [\"apps/api\", \"apps/web\"]"));
     // Shared infrastructure is declared once, at the workspace level, and is not
     // published to the host.
-    assert!(workspace.contains("id = \"postgres\""));
+    assert!(workspace.contains("id = \"db\""));
     assert!(workspace.contains("expose = \"none\""));
 
     let web = planned
@@ -150,7 +150,7 @@ fn answers_change_the_output_predictably() {
     let mut answers: AnswerSet = answers_for(&report);
     answers.answers.insert(
         "compose.expose".to_string(),
-        Answer::Many(vec!["postgres".to_string()]),
+        Answer::Many(vec!["db".to_string()]),
     );
     answers.answers.insert(
         "stack.members".to_string(),
@@ -293,7 +293,7 @@ fn the_answers_are_recorded_in_the_manifest_at_the_root() {
         "{workspace}"
     );
     assert!(
-        workspace.contains("\"compose.shared\" = [\"postgres\", \"redis\"]"),
+        workspace.contains("\"compose.shared\" = [\"cache\", \"db\"]"),
         "a multi-choice answer is a list:\n{workspace}"
     );
     // The line is a bare key, so it has to sit above the first table.
@@ -435,20 +435,20 @@ fn a_service_added_to_the_compose_file_reopens_the_question_that_manages_it() {
     // new service was never decided.
     let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
     assert!(
-        manifest.contains("declined = { \"compose.expose\" = [\"postgres\"] }"),
+        manifest.contains("declined = { \"compose.expose\" = [\"db\"] }"),
         "what the answer passed over is recorded:\n{manifest}"
     );
 
     fixture.write(
         "compose.yaml",
-        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n  jaeger:\n    image: jaegertracing/all-in-one\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5432:5432\"\n  cache:\n    image: example/cache:8\n  traces:\n    image: example/traces:latest\n",
     );
     let report = extract(fixture.path()).expect("extract");
     let recorded = magictree::init::recorded(fixture.path(), &report).expect("recorded");
 
     assert_eq!(
         recorded.reopened.get("compose.shared"),
-        Some(&vec!["jaeger".to_string()]),
+        Some(&vec!["traces".to_string()]),
         "the new service reopens the question that decides it"
     );
     assert!(
@@ -476,7 +476,7 @@ fn a_service_added_to_the_compose_file_reopens_the_question_that_manages_it() {
         .expect("the app manifest")
         .contents();
     assert!(
-        !manifest.contains("jaeger"),
+        !manifest.contains("traces"),
         "nothing decides the new service yet:\n{manifest}"
     );
     assert_eq!(
@@ -485,7 +485,7 @@ fn a_service_added_to_the_compose_file_reopens_the_question_that_manages_it() {
         "a question that was not answered again decides nothing new"
     );
 
-    // Asking it again with everything on offer makes `jaeger` shared.
+    // Asking it again with everything on offer makes `traces` shared.
     let answered: BTreeSet<String> = report.unknowns.iter().map(|u| u.id.clone()).collect();
     let stored = record(&report, &answers_for(&report), &recorded, &answered);
     let answers = answers_for(&report);
@@ -495,7 +495,7 @@ fn a_service_added_to_the_compose_file_reopens_the_question_that_manages_it() {
         .find(|file| file.path == fixture.join("magictree.toml"))
         .expect("the app manifest")
         .contents();
-    assert!(manifest.contains("id = \"jaeger\""), "{manifest}");
+    assert!(manifest.contains("id = \"traces\""), "{manifest}");
 }
 
 /// A single app with a compose file it manages.
@@ -503,7 +503,7 @@ fn compose_app() -> Fixture {
     let fixture = Fixture::new();
     fixture.write(
         "compose.yaml",
-        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5432:5432\"\n  cache:\n    image: example/cache:8\n",
     );
     fixture.write(
         "package.json",
@@ -577,8 +577,8 @@ fn generated_manifests_load_and_resolve() {
             .position(|index| nodes[*index].qual() == needle)
             .unwrap_or_else(|| panic!("{needle} missing from the plan"))
     };
-    assert!(position("postgres") < position("api:api"));
-    assert!(position("redis") < position("web:web"));
+    assert!(position("db") < position("api:api"));
+    assert!(position("cache") < position("web:web"));
 }
 
 #[test]
@@ -688,15 +688,15 @@ fn compose_ports_carry_the_variable_the_compose_file_derives_from() {
         "compose.yaml",
         r#"
 services:
-  zitadel:
-    image: ghcr.io/zitadel/zitadel:latest
+  auth:
+    image: ghcr.io/example/auth:latest
     ports:
-      - "${WT_PORT_ZITADEL:-8080}:8080"
-      - "${WT_PORT_ZITADEL_LOGIN:-3100}:3000"
-  minio:
-    image: minio/minio
+      - "${WT_PORT_AUTH:-8080}:8080"
+      - "${WT_PORT_AUTH_LOGIN:-3100}:3000"
+  objects:
+    image: example/objects:latest
     ports:
-      - "${WT_PORT_MINIO:-9000}:9000"
+      - "${WT_PORT_OBJECTS:-9000}:9000"
 "#,
     );
     fixture.write("package.json", r#"{"name":"solo"}"#);
@@ -706,28 +706,28 @@ services:
     let mut answers = answers_for(&report);
     answers.answers.insert(
         "compose.expose".to_string(),
-        Answer::Many(vec!["zitadel".to_string(), "minio".to_string()]),
+        Answer::Many(vec!["auth".to_string(), "objects".to_string()]),
     );
     let planned = plan(&report, &answers, fixture.path()).expect("plan");
     let manifest = planned[0].contents();
 
     assert!(
-        manifest.contains("env = \"WT_PORT_ZITADEL\""),
+        manifest.contains("env = \"WT_PORT_AUTH\""),
         "the published port must also drive the compose variable:\n{manifest}"
     );
     assert!(
-        manifest.contains("env = \"WT_PORT_ZITADEL_LOGIN\""),
+        manifest.contains("env = \"WT_PORT_AUTH_LOGIN\""),
         "{manifest}"
     );
     // A single-port service keeps the plain form, still carrying its variable.
     assert!(
-        manifest.contains("port = { target = 9000, env = \"WT_PORT_MINIO\" }"),
+        manifest.contains("port = { target = 9000, env = \"WT_PORT_OBJECTS\" }"),
         "{manifest}"
     );
     // Multi-port services get readable names derived from the variables.
-    assert!(manifest.contains("name = \"zitadel\""), "{manifest}");
+    assert!(manifest.contains("name = \"auth\""), "{manifest}");
     assert!(
-        manifest.contains("name = \"zitadel_login\""),
+        manifest.contains("name = \"auth_login\""),
         "the login port is named from its variable, not its position:\n{manifest}"
     );
 }
@@ -739,8 +739,8 @@ fn initializer_services_are_told_to_run_to_completion() {
         "compose.yaml",
         r#"
 services:
-  postgres:
-    image: postgres:18
+  db:
+    image: example/db:18
     ports:
       - "5432:5432"
   stack-init:

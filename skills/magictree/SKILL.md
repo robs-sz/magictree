@@ -142,7 +142,7 @@ or `status` in it for the primary stack's ports.
 In a single-app repository, service names are bare (`web`, `api`).
 
 In a monorepo, app services are qualified as `app:service` (`web:web`, `api:api`), and
-repository-level services such as shared `db` or `redis` are bare.
+repository-level services such as shared `db` or `cache` are bare.
 
 ```bash
 magictree up web:web           # one service plus its dependencies
@@ -228,7 +228,7 @@ Rules that matter:
   never runs automatically.
 - A one-shot compose initialiser (provisioning, migrations) needs `wait = "exit"`, so
   `up` waits for it to finish successfully instead of moving on while it runs.
-- Services that derive their own URLs from a port (`${WT_PORT_ZITADEL}` in another
+- Services that derive their own URLs from a port (`${WT_PORT_AUTH}` in another
   service's environment, or a callback URL registered at startup) need that variable
   set for the whole stack. Declare it with `port.env`; it is then in every launched
   process and in `magictree env`, so a host CLI reads a peer's port without a `[env]`

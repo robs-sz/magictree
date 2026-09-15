@@ -910,7 +910,7 @@ fn a_compose_service_added_later_is_reported_rather_than_ignored() {
     let fixture = Fixture::new();
     fixture.write(
         "compose.yaml",
-        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5432:5432\"\n  cache:\n    image: example/cache:8\n",
     );
     fixture.write(
         "package.json",
@@ -923,23 +923,23 @@ fn a_compose_service_added_later_is_reported_rather_than_ignored() {
     let first = run(&["init", "--accept-defaults"], fixture.path(), &state);
     assert!(first.ok(), "{}", first.combined());
     let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
-    assert!(manifest.contains("id = \"redis\""), "{manifest}");
+    assert!(manifest.contains("id = \"cache\""), "{manifest}");
 
     // Someone adds a service the manifest was never told about.
     fixture.write(
         "compose.yaml",
-        "services:\n  postgres:\n    image: postgres:18\n    ports:\n      - \"5432:5432\"\n  redis:\n    image: redis:8\n  jaeger:\n    image: jaegertracing/all-in-one\n",
+        "services:\n  db:\n    image: example/db:18\n    ports:\n      - \"5432:5432\"\n  cache:\n    image: example/cache:8\n  traces:\n    image: example/traces:latest\n",
     );
     let second = run(&["init", "--accept-defaults"], fixture.path(), &state);
     assert!(second.ok(), "{}", second.combined());
     assert!(
-        second.stderr.contains("jaeger") && second.stderr.contains("never decided"),
+        second.stderr.contains("traces") && second.stderr.contains("never decided"),
         "the new service is reported: {}",
         second.combined()
     );
     let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
     assert!(
-        !manifest.contains("id = \"jaeger\""),
+        !manifest.contains("id = \"traces\""),
         "an unanswered question is not decided for the user:\n{manifest}"
     );
 
@@ -951,7 +951,7 @@ fn a_compose_service_added_later_is_reported_rather_than_ignored() {
     );
     assert!(reanswered.ok(), "{}", reanswered.combined());
     let manifest = std::fs::read_to_string(fixture.join("magictree.toml")).expect("read");
-    assert!(manifest.contains("id = \"jaeger\""), "{manifest}");
+    assert!(manifest.contains("id = \"traces\""), "{manifest}");
 }
 
 #[test]

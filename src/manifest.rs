@@ -115,7 +115,7 @@ pub struct Service {
     #[serde(default)]
     pub command: Option<String>,
     /// One entry per exposed port. A compose service may publish several
-    /// (`${WT_PORT_MINIO}` and `${WT_PORT_MINIO_CONSOLE}`).
+    /// (`${WT_PORT_OBJECTS}` and `${WT_PORT_OBJECTS_CONSOLE}`).
     #[serde(default)]
     pub port: Option<PortSpec>,
     #[serde(default)]
