@@ -10,7 +10,7 @@ run = [{ command = "uv sync --group dev", inputs = ["pyproject.toml"] }]
 id = "api"
 target = { kind = "uv", script = "dev" }
 port = { env = "API_PORT", prefer = 8000 }
-needs = ["db", "redis"]
+needs = ["db", "cache"]
 health = { http = "/healthz", timeout = 60 }
 
 [jobs.seed]

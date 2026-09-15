@@ -1,5 +1,5 @@
 services:
-  postgres:
+  db:
     image: postgres:18
     environment:
       POSTGRES_PASSWORD: shop
@@ -14,8 +14,8 @@ services:
   migrate-db:
     image: postgres:18
     depends_on:
-      postgres:
+      db:
         condition: service_healthy
     environment:
       PGPASSWORD: shop
-    command: ["psql", "-h", "postgres", "-U", "postgres", "-c", "select 1"]
+    command: ["psql", "-h", "db", "-U", "postgres", "-c", "select 1"]

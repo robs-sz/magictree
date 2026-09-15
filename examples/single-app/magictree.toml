@@ -14,7 +14,7 @@ run = [{ command = "pnpm install", inputs = ["pnpm-lock.yaml"] }]
 [[services]]
 id = "db"
 runtime = "compose"
-compose = { file = "compose.yaml", service = "postgres" }
+compose = { file = "compose.yaml", service = "db" }
 port = { target = 5432, env = "WT_PORT_DB" }
 health = { tcp = true, timeout = 30 }
 

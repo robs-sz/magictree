@@ -6,7 +6,7 @@ A workspace: a root manifest listing the apps and holding what they share, plus 
 | path | what it is |
 |---|---|
 | `magictree.toml` | the workspace manifest: apps, shared environment, shared services, a shared job |
-| `compose.yaml` | the containers `db` and `redis` refer to |
+| `compose.yaml` | the containers `db` and `cache` refer to |
 | `apps/web/` | a pnpm app: manifest, `package.json`, lockfile |
 | `apps/api/` | a Python app: manifest, `pyproject.toml` |
 
@@ -21,8 +21,8 @@ services in it are addressed as `app:id` (`web:web`).
 reference a shared port: `DATABASE_URL` resolves to the port allocated to `db` in this
 worktree.
 
-`db` and `redis` are workspace-level services, reachable from any app by their bare id.
-`redis` is `expose = "none"`: the apps reach it over compose DNS, and nothing is published on
+`db` and `cache` are workspace-level services, reachable from any app by their bare id.
+`cache` is `expose = "none"`: the apps reach it over compose DNS, and nothing is published on
 the host. `jobs.shared-seed` belongs to the workspace rather than to an app.
 
 ## apps/web

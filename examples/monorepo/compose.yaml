@@ -1,5 +1,5 @@
 services:
-  postgres:
+  db:
     image: postgres:18
     environment:
       POSTGRES_PASSWORD: shop
@@ -11,5 +11,5 @@ services:
       timeout: 2s
       retries: 30
 
-  redis:
+  cache:
     image: redis:8
