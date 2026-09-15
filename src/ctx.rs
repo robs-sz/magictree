@@ -349,7 +349,36 @@ impl Ctx {
             .and_then(|id| self.loaded.app(id))
             .map(|app| &app.manifest.env)
             .unwrap_or(&EMPTY_ENV);
+        // Every computed key is reserved, so a declared layer can only collide
+        // with a variable a service publishes in `port.env`. Name the service
+        // that owns it: "set by magictree" alone leaves the reader guessing.
+        for (source, layer) in [("workspace", workspace_env), ("app", app_env)] {
+            for key in layer.keys() {
+                if let Some(owner) = self.port_variable_owner(key) {
+                    bail!(
+                        "{source} [env] sets '{key}', which service '{owner}' publishes in \
+                         port.env; magictree already sets it for the whole stack, so remove \
+                         the line"
+                    );
+                }
+            }
+        }
         env::build(self.computed_env(assignment), workspace_env, app_env)
+    }
+
+    /// The service that publishes `variable` in `port.env`, when one does.
+    fn port_variable_owner(&self, variable: &str) -> Option<String> {
+        self.nodes.iter().find_map(|node| {
+            let service = node.service()?;
+            if service.expose != Expose::Port {
+                return None;
+            }
+            service
+                .ports()
+                .iter()
+                .any(|port| port.env.as_deref() == Some(variable))
+                .then(|| node.qual())
+        })
     }
 
     pub fn node_env(

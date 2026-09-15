@@ -513,10 +513,14 @@ port = { env = "WT_PORT_SEED" }
 "#,
     );
     let duplicate = run(&["env"], fixture.path(), &state);
+    let message = duplicate.combined();
     assert!(
-        !duplicate.ok() && duplicate.combined().contains("WT_PORT_SEED"),
-        "a restated port variable must fail loudly:\n{}",
-        duplicate.combined()
+        !duplicate.ok() && message.contains("WT_PORT_SEED"),
+        "a restated port variable must fail loudly:\n{message}"
+    );
+    assert!(
+        message.contains("service 'seed'") && message.contains("port.env"),
+        "the error must name the service that already publishes it:\n{message}"
     );
 }
 
