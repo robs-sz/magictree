@@ -90,9 +90,21 @@ magictree gc                 # reclaim what deleted checkouts left behind
 | `discover`, `init`, `doctor` | read the repository, write manifests, detect drift |
 | `up`, `down`, `status` | start, stop, inspect a worktree's stack |
 | `logs`, `env`, `ports` | service output, resolved environment, port assignment |
+| `exec` | run a command with this worktree's resolved environment |
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |
 
 `--dry-run` works on every command and creates nothing.
+
+```sh
+magictree exec -- just api::seed    # run a command as if the stack had launched it
+```
+
+`exec` takes the command and its arguments verbatim (no shell), gives them this worktree's
+resolved ports and `[env]` on top of your own environment, and runs them in the directory
+`--cwd` names (the current one by default). The child owns the terminal and its exit status
+becomes magictree's, so a recipe can delegate to it instead of hand-rolling
+`eval "$(magictree env --export)"`. Use `magictree exec -- sh -c '...'` when you need a
+shell.
 
 ## Manifest
 

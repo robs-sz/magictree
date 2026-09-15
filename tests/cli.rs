@@ -521,6 +521,103 @@ port = { env = "WT_PORT_SEED" }
 }
 
 #[test]
+fn exec_runs_with_the_worktrees_resolved_environment() {
+    // `exec` replaces the `eval "$(magictree env --export)"` a repository with a
+    // host-side CLI would otherwise hand-roll.
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[[services]]
+id = "api"
+command = "sleep 300"
+port = { env = "WT_PORT_API" }
+
+[[services]]
+id = "seed"
+command = "sleep 300"
+port = { env = "WT_PORT_SEED" }
+"#,
+    );
+    fixture.mkdir("sub");
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    // A dry run runs nothing and claims nothing.
+    let dry = run(
+        &["--dry-run", "exec", "--", "echo", "ran"],
+        fixture.path(),
+        &state,
+    );
+    assert!(dry.ok(), "{}", dry.combined());
+    assert!(dry.stdout.contains("would run"), "{}", dry.stdout);
+    assert!(
+        !dry.stdout.lines().any(|line| line == "ran"),
+        "a dry run must not run the command:\n{}",
+        dry.stdout
+    );
+    assert!(
+        runtime_dirs(&state).is_empty(),
+        "a dry run must not claim any worktree state"
+    );
+
+    let ports = run(&["ports"], fixture.path(), &state);
+    assert!(ports.ok(), "{}", ports.combined());
+    let allocated = |name: &str| -> String {
+        ports
+            .stdout
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("no port line for {name}:\n{}", ports.stdout))
+            .split_whitespace()
+            .nth(1)
+            .expect("port column")
+            .to_string()
+    };
+
+    let exec = run(
+        &[
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$WT_PORT_API $WT_PORT_SEED\"",
+        ],
+        fixture.path(),
+        &state,
+    );
+    assert!(exec.ok(), "{}", exec.combined());
+    assert_eq!(
+        exec.stdout.trim(),
+        format!("{} {}", allocated("api"), allocated("seed")),
+        "the whole stack's declared ports reach the child"
+    );
+
+    // The child's exit status is magictree's.
+    let failed = run(
+        &["exec", "--", "sh", "-c", "exit 7"],
+        fixture.path(),
+        &state,
+    );
+    assert_eq!(failed.status, 7, "{}", failed.combined());
+
+    // The command runs in the directory magictree was pointed at.
+    let pwd = run(
+        &["exec", "--cwd", "sub", "--", "pwd"],
+        fixture.path(),
+        &state,
+    );
+    assert!(pwd.ok(), "{}", pwd.combined());
+    assert!(
+        pwd.stdout.trim().ends_with("sub"),
+        "the command runs in --cwd:\n{}",
+        pwd.stdout
+    );
+}
+
+#[test]
 fn health_check_accepts_a_service_bound_only_to_ipv6() {
     // A dev server asked to listen on `localhost` may bind ::1 only, which is
     // what Vite does. Probing 127.0.0.1 alone reported it as unreachable.

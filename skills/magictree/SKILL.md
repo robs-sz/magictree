@@ -163,6 +163,7 @@ magictree env                  # KEY=value for the current app
 magictree env --app web        # a specific app
 magictree env --export         # export KEY=value, safe to eval
 magictree env --explain        # which layer set each value
+magictree exec -- <cmd> ...    # run a command with that environment
 ```
 
 Values come from three layers, lowest first: repository `[env]`, app `[env]`, then values
@@ -170,6 +171,11 @@ magictree computes (slugs, ports). Ports appear as `MAGICTREE_PORT_<name>`, and 
 variable a service names in `port.env` is a computed value too: the whole stack's set reaches
 every launched process and `magictree env`, so a host tool reads a peer service's declared
 port without restating it in `[env]`. Restating one in `[env]` is an error, not an override.
+
+`magictree exec -- <cmd> ...` runs a command with that whole environment, verbatim (no
+shell), and exits with the command's own status. Prefer it over hand-rolling
+`eval "$(magictree env --export)"`; reach for `magictree exec -- sh -c '...'` when the
+command needs a shell (`|`, `&&`, globs).
 
 Never edit or overwrite repository `.env` files. magictree injects the environment into the
 processes it launches; the repository's own files are left alone.

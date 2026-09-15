@@ -14,7 +14,7 @@ use crate::ports;
 use crate::repo::Repo;
 use crate::run;
 use crate::worktrees;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -65,6 +65,8 @@ pub enum Command {
     Ports(PortsArgs),
     /// Print the resolved environment.
     Env(EnvArgs),
+    /// Run a command with this worktree's resolved environment.
+    Exec(ExecArgs),
     /// Print a shell completion script.
     Completion(CompletionArgs),
 }
@@ -233,6 +235,25 @@ pub struct PortsArgs {
 }
 
 #[derive(Args)]
+pub struct ExecArgs {
+    /// Run with a specific app's environment instead of the current app's.
+    #[arg(long)]
+    pub app: Option<String>,
+    /// Directory to resolve the repository from; the command runs there.
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+    /// Command and arguments, taken verbatim. A command that starts with a
+    /// flag needs `--` before it.
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<String>,
+}
+
+#[derive(Args)]
 pub struct EnvArgs {
     /// Show the merged environment of a specific app.
     #[arg(long)]
@@ -277,6 +298,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Logs(args) => cmd_logs(args),
         Command::Ports(args) => cmd_ports(args, dry_run),
         Command::Env(args) => cmd_env(args, dry_run),
+        Command::Exec(args) => cmd_exec(args, dry_run),
         Command::Completion(args) => cmd_completion(args),
     }
 }
@@ -1283,6 +1305,77 @@ fn cmd_env(args: EnvArgs, dry_run: bool) -> Result<()> {
         print!("{}", plan.dotenv());
     }
     Ok(())
+}
+
+/// Run a command with the environment magictree would give a host service: the
+/// resolved ports and layered `[env]`, on top of the caller's own environment,
+/// in the directory magictree was pointed at. The child owns the terminal, and
+/// its exit status becomes magictree's, so a recipe can delegate to it.
+fn cmd_exec(args: ExecArgs, dry_run: bool) -> Result<()> {
+    let cwd = resolve_cwd(args.cwd)?;
+    let ctx = Ctx::load(&cwd)?;
+    let app = args.app.or_else(|| ctx.loaded.current_app.clone());
+    let assignment = if dry_run {
+        ctx.preview_assignment()
+    } else {
+        ports::ensure(
+            &ctx.paths,
+            &ctx.config,
+            &ctx.repo.key(),
+            &ctx.repo.worktree_id(),
+            &ctx.repo.worktree_root,
+            &ctx.port_requests(&ctx.all_service_indices()),
+        )?
+    };
+    let plan = ctx.build_env(app.as_deref(), &assignment)?;
+    if dry_run {
+        println!("would run: {}", shell_join(&args.command));
+        print!("{}", ctx.with_placeholders(plan).dotenv());
+        return Ok(());
+    }
+
+    let (program, rest) = args
+        .command
+        .split_first()
+        .expect("clap rejects an empty command");
+    let status = std::process::Command::new(program)
+        .args(rest)
+        .current_dir(&cwd)
+        .envs(&plan.vars)
+        .status()
+        .with_context(|| format!("running '{program}'"))?;
+    if !status.success() {
+        std::process::exit(exit_code(status));
+    }
+    Ok(())
+}
+
+/// A child's status as an exit code: its own, or 128+signal when a signal
+/// killed it (the shell convention), so a caller can see why it stopped.
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+/// A command rendered the way a shell would take it back, for a dry run to
+/// show exactly what it would have run.
+fn shell_join(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && arg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "-_./:@,+=".contains(ch))
+            {
+                return arg.clone();
+            }
+            format!("'{}'", arg.replace('\'', "'\\''"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn wait_ready(
