@@ -101,6 +101,17 @@ output. It is idempotent: run it any time. It is safe to re-run after editing `m
 It exits non-zero and explains itself when a service fails to become healthy: on failure
 everything stays running so it can be inspected.
 
+In the primary checkout `up` uses the ports the manifest declares with `prefer`, because the
+repository's own tooling and the files it generates were written against them. A linked
+worktree ignores `prefer` and allocates every port from its own block. Two flags step outside
+that, both refused while the stack is running:
+
+```bash
+magictree up --ports generated   # this checkout's stack on block ports, beside another stack
+magictree up --ports declared    # back to the declared ports
+magictree ports --release        # drop the assignment: its ports stop being reserved
+```
+
 ## Prefer --dry-run before acting
 
 `--dry-run` is a global flag and works on `up`, `down`, `ports`, and `env`. It prints what
@@ -136,6 +147,11 @@ Never delete a branch as part of cleanup; `rm` never does.
 `list` shows only the repository's linked worktrees, so every row it prints is a valid
 `rm` target. The primary checkout is not a linked worktree and never appears; use `ports`
 or `status` in it for the primary stack's ports.
+
+The primary checkout's ports are the ones its manifest declares, and it keeps them while
+stopped: `ports --release` drops the assignment, its reservations included, and the next
+command that needs them allocates again. A linked worktree always allocates its own block, so
+the same service binds a different port in every checkout.
 
 ## Selecting services
 
@@ -207,6 +223,13 @@ Rules that matter:
 - `runtime` defaults to `compose` when `compose` is present, otherwise a host process.
 - `port.env` must be the variable the process actually reads. Check the app's own
   configuration before assuming `PORT`.
+- `prefer` names the port the service uses in the primary checkout. Declare it wherever the
+  repository already assumes a fixed number — its own start script, a generated `.env`, a
+  callback URL registered with an identity provider — because those files are written against
+  that number and a stack moved off it silently splits them. A linked worktree ignores `prefer`
+  and allocates from its block, so declaring one never costs another worktree anything. Do not
+  declare one just to prettify an allocated port. `require` pins a port in every worktree and
+  fails loudly when it is unavailable.
 - A command that pins a port (`next dev -p 3005`, `uvicorn --port 8000`,
   `DATABASE_PORT=5433`) ignores `port.env`, so the second worktree tries to bind the
   same number. `magictree discover` lists these literals, `init` warns about the step it
@@ -256,8 +279,11 @@ than waiting out the probe timeout.
 
 Common causes:
 
-- **Port already taken.** Host ports outside the manifest's `prefer` come from a block
-  allocated per worktree. Run `magictree ports --reassign` to take a fresh block.
+- **Port already taken.** A port outside the primary checkout's declared `prefer` ports comes
+  from a block allocated per worktree. Run `magictree ports --reassign` to take a fresh block.
+  If a *declared* port is already in use, another stack owns it (the repository's own start
+  script, most likely): stop that one, or run `magictree up --ports generated` to put this
+  checkout on its block ports instead.
 - **A container exited.** `magictree logs` only covers host processes; the failure report
   prints the exact `docker compose -p <project> logs <service>` command to use instead. A
   one-shot initialiser that exits zero is treated as finished, not failed.
@@ -272,7 +298,8 @@ Common causes:
 
 - Ports are per worktree, stable across `down`/`up`, and never user-visible inside
   containers: compose services talk to each other over compose DNS (`db:5432`), not over
-  magictree ports. Publish a port only when the host needs to reach it.
+  magictree ports. Publish a port only when the host needs to reach it. The primary
+  checkout's ports are the ones its manifest declares; a linked worktree's come from its block.
 - `MAGICTREE_SLUG` is stable per worktree and is the default `COMPOSE_PROJECT_NAME`.
 - Generated state lives outside the checkout, in
   `~/.local/state/magictree/worktrees/<repo>/<worktree>/`. A checkout is never written to,

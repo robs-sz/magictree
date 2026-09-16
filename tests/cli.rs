@@ -6,8 +6,9 @@
 
 mod support;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
-use support::{have, run, runtime_dirs, Fixture};
+use support::{free_port, have, run, runtime_dirs, Fixture};
 
 /// A host-process stack. Bootstrap writes into the state dir on purpose: a
 /// checkout must come out of a run with nothing new in it.
@@ -1255,4 +1256,266 @@ port = { env = "PORT" }
 
     let down = run(&["down"], &worktree, &state);
     assert!(down.ok(), "{}", down.combined());
+}
+
+/// A host-process stack whose single port is declared, the way a repository
+/// whose own tooling expects a fixed port declares one.
+fn declared_stack_fixture(port: u16) -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            "version = 1\n\n[[services]]\nid = \"idle\"\ncommand = \"sleep 300\"\nport = {{ env = \"PORT\", prefer = {port} }}\n"
+        ),
+    );
+    fixture.git_repo();
+    fixture
+}
+
+fn assigned_port(text: &str, service: &str) -> u16 {
+    text.lines()
+        .find(|line| line.starts_with(service))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("no port for '{service}' in:\n{text}"))
+}
+
+fn blocks_claimed(state: &Path) -> usize {
+    std::fs::read_dir(state.join("blocks"))
+        .map(|entries| entries.flatten().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn the_primary_checkout_uses_a_declared_port() {
+    let declared = free_port();
+    let fixture = declared_stack_fixture(declared);
+    let state = fixture.state_dir();
+
+    let ports = run(&["ports"], fixture.path(), &state);
+    assert!(ports.ok(), "{}", ports.combined());
+    assert_eq!(
+        assigned_port(&ports.stdout, "idle"),
+        declared,
+        "{}",
+        ports.stdout
+    );
+    assert!(
+        ports.stdout.contains("declared ports"),
+        "the header says where the ports come from: {}",
+        ports.stdout
+    );
+}
+
+#[test]
+fn up_ports_generated_moves_the_primary_checkout_off_its_declared_port() {
+    // How a primary checkout runs a stack beside another one: generated ports
+    // come from its own block, so the declared ones stay untouched.
+    let declared = free_port();
+    let fixture = declared_stack_fixture(declared);
+    let state = fixture.state_dir();
+
+    let generated = run(&["up", "--ports", "generated"], fixture.path(), &state);
+    assert!(generated.ok(), "{}", generated.combined());
+    let ports = run(&["ports"], fixture.path(), &state);
+    let assigned = assigned_port(&ports.stdout, "idle");
+    assert_ne!(assigned, declared, "{}", ports.stdout);
+    assert!(ports.stdout.contains("generated ports"), "{}", ports.stdout);
+    assert!(
+        generated.stdout.contains(&format!("localhost:{assigned}")),
+        "the run reports the ports it is actually on: {}",
+        generated.stdout
+    );
+
+    // And back: the declared port was released with the generated assignment.
+    assert!(run(&["down"], fixture.path(), &state).ok());
+    let declared_again = run(&["up", "--ports", "declared"], fixture.path(), &state);
+    assert!(declared_again.ok(), "{}", declared_again.combined());
+    let ports = run(&["ports"], fixture.path(), &state);
+    assert_eq!(
+        assigned_port(&ports.stdout, "idle"),
+        declared,
+        "{}",
+        ports.stdout
+    );
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn changing_ports_under_a_running_stack_is_refused() {
+    let declared = free_port();
+    let fixture = declared_stack_fixture(declared);
+    let state = fixture.state_dir();
+
+    assert!(run(&["up"], fixture.path(), &state).ok());
+
+    let refused = run(&["up", "--ports", "generated"], fixture.path(), &state);
+    assert!(!refused.ok(), "{}", refused.combined());
+    assert!(
+        refused.combined().contains("is running"),
+        "{}",
+        refused.combined()
+    );
+
+    // The mode it is already on is not a change, so `up` stays idempotent.
+    let same = run(&["up", "--ports", "declared"], fixture.path(), &state);
+    assert!(same.ok(), "{}", same.combined());
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn releasing_ports_under_a_running_stack_is_refused() {
+    let declared = free_port();
+    let fixture = declared_stack_fixture(declared);
+    let state = fixture.state_dir();
+
+    assert!(run(&["up"], fixture.path(), &state).ok());
+    let refused = run(&["ports", "--release"], fixture.path(), &state);
+    assert!(!refused.ok(), "{}", refused.combined());
+    assert!(
+        refused.combined().contains("is running"),
+        "{}",
+        refused.combined()
+    );
+    assert_eq!(blocks_claimed(&state), 1);
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn ports_release_clears_the_reservation_and_the_next_up_reclaims_it() {
+    let declared = free_port();
+    let fixture = declared_stack_fixture(declared);
+    let state = fixture.state_dir();
+
+    assert!(run(&["up"], fixture.path(), &state).ok());
+    assert!(run(&["down"], fixture.path(), &state).ok());
+    assert_eq!(blocks_claimed(&state), 1);
+
+    let released = run(&["ports", "--release"], fixture.path(), &state);
+    assert!(released.ok(), "{}", released.combined());
+    assert_eq!(
+        blocks_claimed(&state),
+        0,
+        "nothing stays reserved: {}",
+        released.stdout
+    );
+
+    let up = run(&["up"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    let ports = run(&["ports"], fixture.path(), &state);
+    assert_eq!(assigned_port(&ports.stdout, "idle"), declared);
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn a_dry_run_previews_the_ports_the_run_would_use() {
+    let declared = free_port();
+    let fixture = declared_stack_fixture(declared);
+    let state = fixture.state_dir();
+
+    let declared_plan = run(&["--dry-run", "up"], fixture.path(), &state);
+    assert!(declared_plan.ok(), "{}", declared_plan.combined());
+    assert!(
+        declared_plan.stdout.contains(&format!("PORT={declared}")),
+        "a declared port is previewed as itself: {}",
+        declared_plan.stdout
+    );
+
+    let generated_plan = run(
+        &["--dry-run", "up", "--ports", "generated"],
+        fixture.path(),
+        &state,
+    );
+    assert!(generated_plan.ok(), "{}", generated_plan.combined());
+    assert!(
+        generated_plan.stdout.contains("PORT=<allocated>"),
+        "generated ports are allocated, so they are previewed as such: {}",
+        generated_plan.stdout
+    );
+    assert!(!generated_plan.stdout.contains(&format!("PORT={declared}")));
+    assert_eq!(blocks_claimed(&state), 0, "a dry run claims nothing");
+}
+
+#[test]
+fn a_dry_run_shows_a_placeholder_inside_a_value_built_from_a_port() {
+    // A `[env]` value that interpolates a port is the shape that used to leak
+    // the dry run's sentinel: it printed `PUBLIC_URL=http://localhost:0` for a
+    // port no run had allocated.
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[env]
+PUBLIC_URL = "http://localhost:${MAGICTREE_PORT_idle}"
+
+[[services]]
+id = "idle"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let plan = run(&["--dry-run", "up"], fixture.path(), &state);
+    assert!(plan.ok(), "{}", plan.combined());
+    assert!(
+        plan.stdout
+            .contains("PUBLIC_URL=http://localhost:<allocated>"),
+        "{}",
+        plan.stdout
+    );
+    assert!(plan.stdout.contains("PORT=<allocated>"), "{}", plan.stdout);
+}
+
+#[test]
+fn a_dry_run_keeps_a_declared_port_it_builds_a_value_from() {
+    let declared = free_port();
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"
+version = 1
+
+[env]
+PUBLIC_URL = "http://localhost:${{MAGICTREE_PORT_idle}}"
+
+[[services]]
+id = "idle"
+command = "sleep 300"
+port = {{ env = "PORT", prefer = {declared} }}
+"#
+        ),
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let plan = run(&["--dry-run", "up"], fixture.path(), &state);
+    assert!(plan.ok(), "{}", plan.combined());
+    assert!(
+        plan.stdout
+            .contains(&format!("PUBLIC_URL=http://localhost:{declared}")),
+        "a declared port is previewed as itself, the value built from it too: {}",
+        plan.stdout
+    );
+
+    // Under generated ports the same run allocates, and the value says so.
+    let generated = run(
+        &["--dry-run", "up", "--ports", "generated"],
+        fixture.path(),
+        &state,
+    );
+    assert!(generated.ok(), "{}", generated.combined());
+    assert!(
+        generated
+            .stdout
+            .contains("PUBLIC_URL=http://localhost:<allocated>"),
+        "{}",
+        generated.stdout
+    );
 }

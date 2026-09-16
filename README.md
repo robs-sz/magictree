@@ -75,10 +75,19 @@ binds a different port in every checkout. Untracked build output is not inherite
 ```sh
 magictree list               # linked worktrees with their ports; not the primary checkout
 magictree ports              # this worktree's assignment
+magictree ports --release    # drop it: nothing stays reserved and no stack is touched
+magictree up --ports generated   # this checkout's stack, on its own block ports
 magictree down               # stop; volumes and ports are kept
 magictree rm feat/billing    # stop and remove the worktree; the branch is kept
 magictree gc                 # reclaim what deleted checkouts left behind
 ```
+
+In the primary checkout, `up` starts the stack on the ports the manifest declares (`prefer`),
+which is where the repository's own commands and generated files expect to find them; a linked
+worktree always allocates its own block. `up --ports generated` asks the primary checkout for
+block ports instead, so a second stack can run beside the one on the declared ports, and
+`ports --release` drops an assignment so its ports stop being reserved; the next command that
+needs them (`up`, `ports`, `env`) allocates again.
 
 `rm` accepts a path, a branch name, or a directory name, refuses a dirty worktree unless
 `--force`, and never deletes a branch.
@@ -169,9 +178,9 @@ health = { http = "/", timeout = 120 }
 
 The appended flag lands after the script's own, so it beats whatever the script pins and every
 worktree gets its own URL; that is why `doctor` stays quiet about a `-p` a storybook script
-pins. `prefer = 6006` keeps Storybook on its familiar port in the first worktree. When
-`@storybook/addon-mcp` is installed, that URL also answers MCP at `/mcp`, which is how an agent
-reads and drives the components.
+pins. `prefer = 6006` keeps Storybook on its familiar port in the primary checkout; a linked
+worktree allocates its own. When `@storybook/addon-mcp` is installed, that URL also answers
+MCP at `/mcp`, which is how an agent reads and drives the components.
 
 ### Top level
 
@@ -239,14 +248,26 @@ where each needs its own `name`.
 | `name` | Identifies the port inside its service; defaults to the service id. Must be distinct when a service declares more than one. |
 | `target` | Container-side port published on the allocated host port. A compose service that publishes anything must set it. |
 | `env` | Variable receiving the allocated port: for a host process the one it reads, for a compose service the one its compose file interpolates. Published for the whole stack, so any process may read it. Reserved magictree names are rejected. |
-| `prefer` | Use this port when it is free, otherwise allocate one. |
-| `require` | Fail loudly when this port is unavailable. |
+| `prefer` | The port this service runs on in the primary checkout. Taken as declared there; a linked worktree ignores it and allocates from its own block. |
+| `require` | Fail loudly when this port is unavailable, in any worktree. |
 
-`prefer` and `require` are mutually exclusive. A port a worktree has recorded is reserved
-machine-wide even while that worktree is stopped, so a `prefer` port stays stable instead of
+A declared port is the checkout's own: the repository's tooling, the `.env` files it generates
+and anything registered against a callback URL were written against that number, so the primary
+checkout takes it or says why it cannot — it is never traded for a free one. That is what makes
+a stack magictree starts in the primary checkout land where the repository's own commands
+already look. `magictree up --ports generated` sets that aside and allocates every port from the
+checkout's block, which is how a second stack runs beside the first without touching the
+declared ports; `--ports declared` takes them back, and neither can happen under a running
+stack.
+
+A linked worktree never takes a declared port: every port comes from its own block, so two
+worktrees run at once and a worktree started first cannot take the port the primary checkout
+expects. `prefer` and `require` are mutually exclusive. A port an assignment has recorded stays
+reserved machine-wide even while that worktree is stopped, so a port stays stable instead of
 being taken by a worktree that starts later and then answers the owner's health probe;
-`ports --reassign` or `gc` releases it. `require` treats a port held by another worktree as
-unavailable.
+`ports --release` drops an assignment and its reservations, `ports --reassign` re-allocates in
+the mode the worktree recorded, and `gc` reclaims what deleted checkouts left behind. `require`
+treats a port held by another worktree as unavailable.
 
 Inside the compose network services reach each other over compose DNS (`db:5432`), so publish
 a port only when the host needs to reach it.
@@ -324,11 +345,13 @@ one.
 | `~/.config/magictree/config.toml` | optional: port range, timeouts |
 
 Ports come from `20000-32767`, are stable across restarts, and are never visible inside
-containers. Generated state lives in magictree's state dir, keyed by repository and worktree,
-so **nothing is ever written into the checkout** (`git status` stays clean without a
-`.gitignore` or `git/info/exclude` entry) and `gc` can stop a worktree's processes after its
-checkout is gone. `gc` reconciles one repository; `magictree gc --all` sweeps every repository
-the state dir knows about, the only way to reclaim one that is itself gone.
+containers. A port the primary checkout declares with `prefer` is wherever the manifest says
+instead, and is not carved out of a block. Generated state lives in magictree's state dir,
+keyed by repository and worktree, so **nothing is ever written into the checkout**
+(`git status` stays clean without a `.gitignore` or `git/info/exclude` entry) and `gc` can
+stop a worktree's processes after its checkout is gone. `gc` reconciles one repository;
+`magictree gc --all` sweeps every repository the state dir knows about, the only way to
+reclaim one that is itself gone.
 
 magictree never writes to repository `.env` files.
 

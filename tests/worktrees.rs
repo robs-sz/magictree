@@ -55,6 +55,7 @@ fn repo_with_wt(name: &str) -> (Fixture, std::path::PathBuf, std::path::PathBuf)
         &main.worktree_id(),
         &main.worktree_root,
         &[request("web")],
+        None,
     )
     .expect("main assignment");
 
@@ -66,6 +67,7 @@ fn repo_with_wt(name: &str) -> (Fixture, std::path::PathBuf, std::path::PathBuf)
         &linked.worktree_id(),
         &linked.worktree_root,
         &[request("web")],
+        None,
     )
     .expect("worktree assignment");
 
@@ -145,6 +147,7 @@ fn runtime_with_process(paths: &Paths, linked: &Repo, fixture: &Fixture) -> (Pat
         &linked.worktree_id(),
         &linked.worktree_root,
         &[request("web")],
+        None,
     )
     .expect("assignment");
     std::fs::write(
@@ -311,6 +314,7 @@ fn gc_leaves_other_repositories_alone() {
         "some-worktree",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("foreign assignment");
 
@@ -456,6 +460,7 @@ fn a_worktree_named_main_does_not_share_the_primary_block() {
         &primary.worktree_id(),
         &primary.worktree_root,
         &[request("web")],
+        None,
     )
     .expect("primary assignment");
     let linked_block = ports::ensure(
@@ -465,6 +470,7 @@ fn a_worktree_named_main_does_not_share_the_primary_block() {
         &linked.worktree_id(),
         &linked.worktree_root,
         &[request("web")],
+        None,
     )
     .expect("linked assignment");
 

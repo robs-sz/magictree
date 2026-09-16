@@ -415,6 +415,7 @@ wait = "exit"
         worktree_id: "wt".to_string(),
         worktree_path: None,
         base: 24280,
+        mode: magictree::ports::PortMode::Block,
         ports,
     };
 

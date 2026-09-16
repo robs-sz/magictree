@@ -34,10 +34,10 @@ container-side port to publish on an allocated one, and `port.env` is the variab
 compose file interpolates (`${WT_PORT_DB:-5432}` in `compose.yaml`). `health.tcp` waits for
 that port to accept a connection.
 
-`web` is a host process run through pnpm. `prefer` takes 5173 when it is free and falls back
-to an allocated port otherwise; `needs` holds the service back until `db` is healthy.
-`port.env` must name the variable the process actually reads: the manifest cannot fix a
-service that reads a different one.
+`web` is a host process run through pnpm. `prefer` is the port the primary checkout uses, and
+a linked worktree allocates its own instead; `needs` holds the service back until `db` is
+healthy. `port.env` must name the variable the process actually reads: the manifest cannot fix
+a service that reads a different one.
 
 `api` declares two ports. A service with several ports names each one, and both variables
 are set for the process. `$API_PORT` inside the command is expanded from the allocation, so

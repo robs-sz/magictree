@@ -191,6 +191,13 @@ pub struct UpArgs {
     /// Start every service in the repository.
     #[arg(long)]
     pub all: bool,
+    /// Which ports to use: `declared` takes each service's `prefer`, which is
+    /// what the primary checkout's own tooling and generated files expect, so
+    /// it is the default there; `generated` allocates every port from this
+    /// worktree's block, keeping the stack off the repository's ports. Changing
+    /// the mode re-allocates the worktree's ports.
+    #[arg(long, value_name = "MODE", value_enum)]
+    pub ports: Option<ports::PortMode>,
     /// Directory to resolve the repository from.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
@@ -227,9 +234,14 @@ pub struct LogsArgs {
 
 #[derive(Args)]
 pub struct PortsArgs {
-    /// Discard the current assignment and allocate a new block.
-    #[arg(long)]
+    /// Discard the current assignment and allocate fresh ports in the mode this
+    /// worktree recorded.
+    #[arg(long, conflicts_with = "release")]
     pub reassign: bool,
+    /// Drop the assignment and allocate nothing: this worktree's ports stop
+    /// being reserved, and the next `up` allocates from scratch.
+    #[arg(long)]
+    pub release: bool,
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 }
@@ -700,7 +712,7 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
     }
     let mut ctx = Ctx::load(&path)?;
     let selection = ctx.scope(&[], &[], false)?;
-    ensure(&mut ctx, &selection).map(|_| ())
+    ensure(&mut ctx, &selection, None).map(|_| ())
 }
 
 fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
@@ -843,19 +855,37 @@ fn cmd_up(args: UpArgs, dry_run: bool) -> Result<()> {
     let mut ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     let selection = ctx.scope(&args.services, &args.apps, args.all)?;
     if dry_run {
-        return dryrun::up(&ctx, &selection);
+        return dryrun::up(&ctx, &selection, args.ports);
     }
-    ensure(&mut ctx, &selection).map(|_| ())
+    ensure(&mut ctx, &selection, args.ports).map(|_| ())
 }
 
 /// The idempotent core: allocate ports, materialise env, bootstrap, then start
 /// services in dependency order, waiting for each to become healthy, and finish
 /// with the manifest's `after` steps.
-fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
+fn ensure(
+    ctx: &mut Ctx,
+    selection: &[usize],
+    requested: Option<ports::PortMode>,
+) -> Result<ports::Assignment> {
     // Every service gets an assignment, not just the selected ones: a later
     // partial `up` still has to write an override for its dependencies, and a
     // stable worktree-wide assignment is easier to reason about.
     let all_services = ctx.all_service_indices();
+    // A mode change re-allocates, which cannot happen under a running stack:
+    // containers keep publishing the ports they were created with while
+    // `ports`, `env` and the health probes move on to the new ones.
+    if let Some(mode) = requested {
+        let current = ports::load(&ctx.paths, &ctx.repo.key(), &ctx.repo.worktree_id())?;
+        if ports::effective_mode(current.as_ref(), ctx.repo.is_main_worktree()) != mode {
+            if let Some(service) = running_service(ctx)? {
+                bail!(
+                    "'{service}' is running; run `magictree down` before changing this worktree's \
+                     ports"
+                );
+            }
+        }
+    }
     let assignment = ports::ensure(
         &ctx.paths,
         &ctx.config,
@@ -863,6 +893,7 @@ fn ensure(ctx: &mut Ctx, selection: &[usize]) -> Result<ports::Assignment> {
         &ctx.repo.worktree_id(),
         &ctx.repo.worktree_root,
         &ctx.port_requests(&all_services),
+        requested,
     )?;
     ctx.adopt_legacy_runtime()?;
     ctx.ensure_runtime_dirs()?;
@@ -1243,10 +1274,81 @@ fn follow(path: &Path, mut offset: u64) -> Result<()> {
     }
 }
 
+/// The first service of this worktree that is still up: a live pid file for a
+/// host process, or a container in the worktree's own compose project that has
+/// not exited. Enough to refuse a change that would move ports out from under a
+/// running stack, and to name what has to stop first.
+fn running_service(ctx: &Ctx) -> Result<Option<String>> {
+    let runners: HashMap<(PathBuf, String), ComposeRunner> = ctx
+        .compose_identities()
+        .into_iter()
+        .map(|(file, project)| {
+            let key = (file.clone(), project.clone());
+            (key, ComposeRunner::new(file, None, project))
+        })
+        .collect();
+    let mut states: HashMap<(PathBuf, String), Vec<ContainerState>> = HashMap::new();
+
+    for &index in &ctx.all_service_indices() {
+        let node = &ctx.nodes[index];
+        match node.runtime() {
+            Some(Runtime::Compose) => {
+                let service = node.service().expect("service node");
+                let key = ctx.runner_key(node).expect("compose runner key");
+                if !states.contains_key(&key) {
+                    let runner = runners
+                        .get(&key)
+                        .ok_or_else(|| anyhow!("{}: no compose runner", node.qual()))?;
+                    states.insert(key.clone(), runner.ps(&BTreeMap::new())?);
+                }
+                let container = service
+                    .compose
+                    .as_ref()
+                    .expect("validated compose reference")
+                    .service
+                    .clone();
+                let up = states[&key]
+                    .iter()
+                    .find(|entry| entry.service == container)
+                    .is_some_and(|entry| {
+                        !matches!(entry.state.as_str(), "exited" | "dead" | "created" | "")
+                    });
+                if up {
+                    return Ok(Some(node.qual()));
+                }
+            }
+            _ => {
+                if run::read_pid(&ctx.runtime_dir, &node.qual())
+                    .map(run::is_alive)
+                    .unwrap_or(false)
+                {
+                    return Ok(Some(node.qual()));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
     let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     if dry_run {
         println!("dry run: no assignment is read, claimed, or released");
+        let mode = if ctx.repo.is_main_worktree() {
+            ports::PortMode::Declared
+        } else {
+            ports::PortMode::Block
+        };
+        println!(
+            "worktree {} takes {} ports{}",
+            ctx.slug,
+            mode.describe(),
+            match mode {
+                ports::PortMode::Declared =>
+                    "; `up --ports generated` allocates from its block instead",
+                ports::PortMode::Block => ": a linked worktree never takes a declared port",
+            }
+        );
         let requests = ctx.port_requests(&ctx.all_service_indices());
         if requests.is_empty() {
             println!("no service exposes a port");
@@ -1257,9 +1359,11 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
                 request.name,
                 match request.require {
                     Some(port) => format!("required {port}"),
-                    None => match request.prefer {
-                        Some(port) => format!("prefers {port}, otherwise allocated"),
-                        None => "allocated on first real up".to_string(),
+                    None => match (request.prefer, mode) {
+                        (Some(port), ports::PortMode::Declared) => format!("declared {port}"),
+                        (Some(port), ports::PortMode::Block) =>
+                            format!("declares {port}, allocated from the block"),
+                        (None, _) => "allocated from the block".to_string(),
                     },
                 }
             );
@@ -1270,8 +1374,32 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
         );
         return Ok(());
     }
+    if args.release {
+        // Releasing under a running stack has the same effect as changing the
+        // mode: the next read re-allocates and reports ports nothing is using.
+        if let Some(service) = running_service(&ctx)? {
+            bail!(
+                "'{service}' is running; run `magictree down` before releasing this worktree's \
+                 ports"
+            );
+        }
+        return match ports::release(&ctx.paths, &ctx.repo.key(), &ctx.repo.worktree_id())? {
+            Some(path) => {
+                println!("released {}", path.display());
+                println!(
+                    "these ports are no longer reserved; the next command that needs them \
+                     allocates again"
+                );
+                Ok(())
+            }
+            None => {
+                println!("no assignment to release");
+                Ok(())
+            }
+        };
+    }
     if args.reassign {
-        match ports::reassign(&ctx.paths, &ctx.repo.key(), &ctx.repo.worktree_id())? {
+        match ports::release(&ctx.paths, &ctx.repo.key(), &ctx.repo.worktree_id())? {
             Some(path) => println!("released {}", path.display()),
             None => println!("no assignment to release"),
         }
@@ -1283,12 +1411,24 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
         &ctx.repo.worktree_id(),
         &ctx.repo.worktree_root,
         &ctx.port_requests(&ctx.all_service_indices()),
+        None,
     )?;
-    println!(
-        "worktree {} (block {}-{})",
-        ctx.slug,
+    let block = format!(
+        "{}-{}",
         assignment.base,
-        assignment.base + ctx.config.port_stride - 1
+        assignment.base.saturating_add(ctx.config.port_stride - 1)
+    );
+    let in_block = assignment.ports.values().any(|port| {
+        *port >= assignment.base && *port < assignment.base.saturating_add(ctx.config.port_stride)
+    });
+    println!(
+        "worktree {} ({})",
+        ctx.slug,
+        match (assignment.mode, in_block) {
+            (ports::PortMode::Block, _) => format!("generated ports, block {block}"),
+            (ports::PortMode::Declared, true) => format!("declared ports plus block {block}"),
+            (ports::PortMode::Declared, false) => "declared ports".to_string(),
+        }
     );
     for (name, port) in &assignment.ports {
         println!("{name:<24} {port:<6} http://localhost:{port}");
@@ -1299,23 +1439,19 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
 fn cmd_env(args: EnvArgs, dry_run: bool) -> Result<()> {
     let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     let app = args.app.or_else(|| ctx.loaded.current_app.clone());
-    let assignment = if dry_run {
-        ctx.preview_assignment()
+    let plan = if dry_run {
+        ctx.preview_plan(app.as_deref(), None)?
     } else {
-        ports::ensure(
+        let assignment = ports::ensure(
             &ctx.paths,
             &ctx.config,
             &ctx.repo.key(),
             &ctx.repo.worktree_id(),
             &ctx.repo.worktree_root,
             &ctx.port_requests(&ctx.all_service_indices()),
-        )?
-    };
-    let plan = ctx.build_env(app.as_deref(), &assignment)?;
-    let plan = if dry_run {
-        ctx.with_placeholders(plan)
-    } else {
-        plan
+            None,
+        )?;
+        ctx.build_env(app.as_deref(), &assignment)?
     };
     if args.explain {
         print!("{}", plan.explain());
@@ -1335,24 +1471,21 @@ fn cmd_exec(args: ExecArgs, dry_run: bool) -> Result<()> {
     let cwd = resolve_cwd(args.cwd)?;
     let ctx = Ctx::load(&cwd)?;
     let app = args.app.or_else(|| ctx.loaded.current_app.clone());
-    let assignment = if dry_run {
-        ctx.preview_assignment()
-    } else {
-        ports::ensure(
-            &ctx.paths,
-            &ctx.config,
-            &ctx.repo.key(),
-            &ctx.repo.worktree_id(),
-            &ctx.repo.worktree_root,
-            &ctx.port_requests(&ctx.all_service_indices()),
-        )?
-    };
-    let plan = ctx.build_env(app.as_deref(), &assignment)?;
     if dry_run {
         println!("would run: {}", shell_join(&args.command));
-        print!("{}", ctx.with_placeholders(plan).dotenv());
+        print!("{}", ctx.preview_plan(app.as_deref(), None)?.dotenv());
         return Ok(());
     }
+    let assignment = ports::ensure(
+        &ctx.paths,
+        &ctx.config,
+        &ctx.repo.key(),
+        &ctx.repo.worktree_id(),
+        &ctx.repo.worktree_root,
+        &ctx.port_requests(&ctx.all_service_indices()),
+        None,
+    )?;
+    let plan = ctx.build_env(app.as_deref(), &assignment)?;
 
     let (program, rest) = args
         .command
@@ -1447,6 +1580,7 @@ static EMPTY_ASSIGNMENT: ports::Assignment = ports::Assignment {
     worktree_id: String::new(),
     worktree_path: None,
     base: 0,
+    mode: ports::PortMode::Declared,
     ports: BTreeMap::new(),
 };
 

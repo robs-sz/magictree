@@ -19,7 +19,11 @@ pub struct WorktreeEntry {
 }
 
 /// Identity the primary checkout reserves.
-const PRIMARY_WORKTREE_ID: &str = "main";
+///
+/// Public because it is also the boundary of what a declared port means: a
+/// `prefer` is the primary checkout's port, so port allocation has to tell the
+/// primary from a linked worktree by this id alone.
+pub const PRIMARY_WORKTREE_ID: &str = "main";
 
 /// Identity for a linked worktree, from the administrative directory name git
 /// assigned it at `git_dir`.

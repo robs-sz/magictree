@@ -1,5 +1,6 @@
 use crate::ctx::Ctx;
 use crate::manifest::{Expose, NodeKind, RunStep, Runtime};
+use crate::ports;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -31,7 +32,7 @@ struct PlannedHostService {
     has_health: bool,
     port_variable: Option<String>,
 }
-pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
+pub fn up(ctx: &Ctx, selection: &[usize], mode: Option<ports::PortMode>) -> Result<()> {
     println!(
         "dry run: nothing below is executed or written\n\nworktree root  {}",
         ctx.repo.worktree_root.display()
@@ -48,9 +49,19 @@ pub fn up(ctx: &Ctx, selection: &[usize]) -> Result<()> {
     );
     println!("state dir      {}", ctx.paths.state_dir.display());
     println!("runtime dir    {}/", ctx.runtime_dir.display());
+    println!(
+        "ports          {}",
+        match mode {
+            Some(ports::PortMode::Declared) =>
+                "declared: the ports the manifest declares, as the primary checkout uses them",
+            Some(ports::PortMode::Block) =>
+                "generated: every port from this worktree's block, ignoring declared ports",
+            None => "the ones this worktree defaults to",
+        }
+    );
 
     println!("\n# environment (ports marked <allocated> are chosen on the first real up)");
-    let plan = ctx.preview_env()?;
+    let plan = ctx.preview_env(mode)?;
     for (key, value) in &plan.vars {
         println!("{key}={value}");
     }

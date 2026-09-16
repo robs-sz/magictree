@@ -4,7 +4,7 @@ mod support;
 
 use magictree::config::Config;
 use magictree::paths::Paths;
-use magictree::ports::{self, PortRequest};
+use magictree::ports::{self, PortMode, PortRequest};
 use support::{free_port, Fixture, PortGuard};
 
 fn paths(fixture: &Fixture) -> Paths {
@@ -23,6 +23,22 @@ fn request(name: &str) -> PortRequest {
     }
 }
 
+fn preferred(name: &str, port: u16) -> PortRequest {
+    PortRequest {
+        name: name.to_string(),
+        prefer: Some(port),
+        require: None,
+    }
+}
+
+fn required(name: &str, port: u16) -> PortRequest {
+    PortRequest {
+        name: name.to_string(),
+        prefer: None,
+        require: Some(port),
+    }
+}
+
 #[test]
 fn assignments_are_stable_across_calls() {
     let fixture = Fixture::new();
@@ -36,6 +52,7 @@ fn assignments_are_stable_across_calls() {
         "main",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate");
     let second = ports::ensure(
@@ -45,6 +62,7 @@ fn assignments_are_stable_across_calls() {
         "main",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate again");
 
@@ -65,6 +83,7 @@ fn different_worktrees_of_one_repository_get_different_blocks() {
         "wt-a",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate a");
     let right = ports::ensure(
@@ -74,6 +93,7 @@ fn different_worktrees_of_one_repository_get_different_blocks() {
         "wt-b",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate b");
 
@@ -94,6 +114,7 @@ fn different_repositories_do_not_share_assignments() {
         "main",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate a");
     let right = ports::ensure(
@@ -103,6 +124,7 @@ fn different_repositories_do_not_share_assignments() {
         "main",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate b");
     assert_ne!(
@@ -125,6 +147,7 @@ fn a_new_service_does_not_move_existing_ports() {
         "main",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate");
     let web_port = *first.ports.get("web").unwrap();
@@ -136,6 +159,7 @@ fn a_new_service_does_not_move_existing_ports() {
         "main",
         fixture.path(),
         &[request("web"), request("api")],
+        None,
     )
     .expect("extend");
 
@@ -144,38 +168,183 @@ fn a_new_service_does_not_move_existing_ports() {
 }
 
 #[test]
-fn preferred_port_is_used_when_free() {
+fn the_primary_checkout_takes_a_declared_port() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let wanted = free_port();
+
+    let assignment = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", wanted)],
+        None,
+    )
+    .expect("allocate");
+
+    assert_eq!(assignment.ports.get("web"), Some(&wanted));
+    assert_eq!(assignment.mode, PortMode::Declared);
+}
+
+#[test]
+fn a_declared_port_is_taken_even_while_another_process_holds_it() {
+    // The declared port is the checkout's own: the repository's tooling, its
+    // generated `.env` files and anything registered against its callback URL
+    // were written against it. Moving the stack to another port to dodge a busy
+    // one is what silently splits the two, so the port is recorded as declared
+    // and the launch reports the conflict.
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let guard = PortGuard::occupy(0);
+    let held = guard.port();
+
+    let assignment = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", held)],
+        None,
+    )
+    .expect("allocate");
+
+    assert_eq!(
+        assignment.ports.get("web"),
+        Some(&held),
+        "a declared port is not traded away for a free one"
+    );
+}
+
+#[test]
+fn a_linked_worktree_allocates_from_its_block_and_ignores_a_declaration() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let declared = free_port();
+
+    let assignment = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "wt-a",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate");
+
+    let assigned = *assignment.ports.get("web").expect("a port");
+    assert_ne!(
+        assigned, declared,
+        "a declared port belongs to the primary checkout"
+    );
+    assert!(assigned >= config.port_range_start && assigned <= config.port_range_end);
+    assert_eq!(assignment.mode, PortMode::Block);
+}
+
+#[test]
+fn a_linked_worktree_cannot_ask_for_declared_ports() {
     let fixture = Fixture::new();
     let paths = paths(&fixture);
     let config = Config::default();
 
-    // Another test binary may take the port between picking it and allocating,
-    // in which case a fresh one is tried; the property under test is unchanged.
-    let mut last = None;
-    for _ in 0..5 {
-        let wanted = free_port();
-        let assignment = ports::ensure(
-            &paths,
-            &config,
-            "repo",
-            "main",
-            fixture.path(),
-            &[PortRequest {
-                name: "web".to_string(),
-                prefer: Some(wanted),
-                require: None,
-            }],
-        )
-        .expect("allocate");
-        let assigned = *assignment.ports.get("web").expect("a port");
-        if assigned == wanted {
-            return;
-        }
-        last = Some((wanted, assigned));
-        // Release so the next attempt starts clean.
-        let _ = ports::reassign(&paths, "repo", "main");
-    }
-    panic!("a free preference was never honoured, last: {last:?}");
+    let error = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "wt-a",
+        fixture.path(),
+        &[request("web")],
+        Some(PortMode::Declared),
+    )
+    .expect_err("must refuse");
+
+    assert!(error.to_string().contains("primary checkout"), "{error}");
+}
+
+#[test]
+fn generated_ports_ignore_declarations_on_the_primary_checkout() {
+    // `up --ports generated` is how a primary checkout keeps a stack off the
+    // ports the repository declares, for local testing beside another stack.
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let declared = free_port();
+
+    let assignment = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        Some(PortMode::Block),
+    )
+    .expect("allocate");
+
+    let assigned = *assignment.ports.get("web").expect("a port");
+    assert_ne!(assigned, declared);
+    assert!(assigned >= config.port_range_start && assigned <= config.port_range_end);
+    assert_eq!(assignment.mode, PortMode::Block);
+}
+
+#[test]
+fn switching_mode_reallocates() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let declared = free_port();
+
+    let first = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate declared");
+    assert_eq!(first.ports.get("web"), Some(&declared));
+
+    let generated = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        Some(PortMode::Block),
+    )
+    .expect("allocate generated");
+    let moved = *generated.ports.get("web").expect("a port");
+    assert_ne!(
+        moved, declared,
+        "asking for generated ports moves the stack off the declared ones"
+    );
+    assert_eq!(generated.mode, PortMode::Block);
+
+    let back = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        Some(PortMode::Declared),
+    )
+    .expect("allocate declared again");
+    assert_eq!(
+        back.ports.get("web"),
+        Some(&declared),
+        "and back again: the declared port was released with the old assignment"
+    );
+    assert_eq!(back.mode, PortMode::Declared);
 }
 
 #[test]
@@ -200,48 +369,110 @@ fn a_port_bound_on_the_wildcard_is_not_free() {
         &paths,
         &config,
         "repo",
-        "main",
+        "wt-a",
         fixture.path(),
-        &[PortRequest {
-            name: "web".to_string(),
-            prefer: Some(taken),
-            require: None,
-        }],
+        &[request("web")],
+        None,
     )
     .expect("allocate");
 
-    let assigned = *assignment.ports.get("web").expect("a port");
-    assert_ne!(
-        assigned, taken,
-        "a preference bound on the wildcard must not be used"
-    );
+    for port in assignment.ports.values() {
+        assert_ne!(*port, taken, "a busy port must not be handed out");
+    }
 }
 
 #[test]
-fn preferred_port_falls_back_when_taken() {
+fn a_linked_worktree_never_takes_the_primary_checkouts_port() {
     let fixture = Fixture::new();
     let paths = paths(&fixture);
     let config = Config::default();
-    let guard = PortGuard::occupy(0);
-    let taken = guard.port();
+    let declared = free_port();
 
-    let assignment = ports::ensure(
+    // The primary checkout declares its port. Nothing binds it here, which is
+    // exactly the case that used to hand it to a worktree started first.
+    let primary = ports::ensure(
         &paths,
         &config,
         "repo",
         "main",
         fixture.path(),
-        &[PortRequest {
-            name: "web".to_string(),
-            prefer: Some(taken),
-            require: None,
-        }],
+        &[preferred("web", declared)],
+        None,
     )
-    .expect("allocate");
+    .expect("allocate primary");
+    assert_eq!(primary.ports.get("web"), Some(&declared));
 
-    let assigned = *assignment.ports.get("web").expect("a port");
-    assert_ne!(assigned, taken, "a busy preference must not be used");
-    assert!(assigned >= config.port_range_start && assigned <= config.port_range_end);
+    let other = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "wt-a",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate linked");
+    assert_ne!(other.ports.get("web"), Some(&declared));
+
+    // Releasing the primary's assignment does not put its port up for grabs:
+    // a linked worktree allocates from its block whatever the manifest declares.
+    ports::release(&paths, "repo", "main").expect("release primary");
+    let after = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "wt-b",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate refreshed linked");
+    assert_ne!(after.ports.get("web"), Some(&declared));
+
+    let reclaimed = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate primary again");
+    assert_eq!(reclaimed.ports.get("web"), Some(&declared));
+}
+
+#[test]
+fn a_declared_port_held_by_another_checkout_fails_loudly() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let declared = free_port();
+
+    ports::ensure(
+        &paths,
+        &config,
+        "repo-a",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate the first checkout");
+
+    let error = ports::ensure(
+        &paths,
+        &config,
+        "repo-b",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect_err("must refuse a port another checkout holds");
+
+    assert!(error.to_string().contains("held by"), "{error}");
+    assert!(error.to_string().contains("--ports"), "{error}");
 }
 
 #[test]
@@ -257,15 +488,43 @@ fn required_port_that_is_taken_fails_loudly() {
         "repo",
         "main",
         fixture.path(),
-        &[PortRequest {
-            name: "oauth".to_string(),
-            prefer: None,
-            require: Some(guard.port()),
-        }],
+        &[required("oauth", guard.port())],
+        None,
     )
     .expect_err("must refuse");
 
     assert!(error.to_string().contains("not available"), "{error}");
+}
+
+#[test]
+fn required_port_held_by_another_worktree_fails_loudly() {
+    let fixture = Fixture::new();
+    let paths = paths(&fixture);
+    let config = Config::default();
+    let declared = free_port();
+
+    ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "main",
+        fixture.path(),
+        &[preferred("web", declared)],
+        None,
+    )
+    .expect("allocate the primary checkout");
+
+    let error = ports::ensure(
+        &paths,
+        &config,
+        "repo",
+        "other",
+        fixture.path(),
+        &[required("oauth", declared)],
+        None,
+    )
+    .expect_err("must refuse a port another worktree holds");
+    assert!(error.to_string().contains("held by"), "{error}");
 }
 
 #[test]
@@ -280,22 +539,24 @@ fn blocks_skip_over_a_range_that_is_already_busy() {
         &paths,
         &config,
         "repo",
-        "main",
+        "wt-a",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate");
     let base = first.base;
     let _guard = PortGuard::occupy(base);
 
-    ports::reassign(&paths, "repo", "main").expect("release");
+    ports::release(&paths, "repo", "wt-a").expect("release");
     let second = ports::ensure(
         &paths,
         &config,
         "repo",
-        "main",
+        "wt-a",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate around the conflict");
 
@@ -306,7 +567,7 @@ fn blocks_skip_over_a_range_that_is_already_busy() {
 }
 
 #[test]
-fn reassign_releases_the_assignment() {
+fn release_frees_the_assignment() {
     let fixture = Fixture::new();
     let paths = paths(&fixture);
     let config = Config::default();
@@ -315,141 +576,20 @@ fn reassign_releases_the_assignment() {
         &paths,
         &config,
         "repo",
-        "main",
+        "wt-a",
         fixture.path(),
         &[request("web")],
+        None,
     )
     .expect("allocate");
-    let released = ports::reassign(&paths, "repo", "main").expect("release");
+    let released = ports::release(&paths, "repo", "wt-a").expect("release");
     assert!(released.is_some());
 
-    let loaded = ports::load(&paths, "repo", "main").expect("load");
+    let loaded = ports::load(&paths, "repo", "wt-a").expect("load");
     assert!(loaded.is_none(), "released blocks are gone");
-}
 
-#[test]
-fn a_preferred_port_stays_reserved_for_the_worktree_that_recorded_it() {
-    let fixture = Fixture::new();
-    let paths = paths(&fixture);
-    let config = Config::default();
-
-    // A port can be taken by another process between picking it and allocating,
-    // which would make the assertions vacuous; retry until the preference holds.
-    let mut last = None;
-    for _ in 0..5 {
-        let wanted = free_port();
-        let owner = ports::ensure(
-            &paths,
-            &config,
-            "repo",
-            "owner",
-            fixture.path(),
-            &[PortRequest {
-                name: "web".to_string(),
-                prefer: Some(wanted),
-                require: None,
-            }],
-        )
-        .expect("allocate owner");
-        if owner.ports.get("web") != Some(&wanted) {
-            last = Some(wanted);
-            let _ = ports::reassign(&paths, "repo", "owner");
-            continue;
-        }
-
-        // The owner is stopped, so nothing binds its port. A second worktree
-        // must not take it anyway: the owner's assignment still holds it, and
-        // handing it over makes the owner's dead service report healthy against
-        // the new worktree's process.
-        let other = ports::ensure(
-            &paths,
-            &config,
-            "repo",
-            "other",
-            fixture.path(),
-            &[PortRequest {
-                name: "web".to_string(),
-                prefer: Some(wanted),
-                require: None,
-            }],
-        )
-        .expect("allocate other");
-        assert_ne!(
-            other.ports.get("web"),
-            Some(&wanted),
-            "a port recorded by another worktree is reserved: {other:?}"
-        );
-
-        // Releasing the owner releases its reservation.
-        ports::reassign(&paths, "repo", "owner").expect("release owner");
-        let next = ports::ensure(
-            &paths,
-            &config,
-            "repo",
-            "next",
-            fixture.path(),
-            &[PortRequest {
-                name: "web".to_string(),
-                prefer: Some(wanted),
-                require: None,
-            }],
-        )
-        .expect("allocate next");
-        assert_eq!(
-            next.ports.get("web"),
-            Some(&wanted),
-            "a released preference is available again"
-        );
-        return;
-    }
-    panic!("a free preference was never honoured, last: {last:?}");
-}
-
-#[test]
-fn required_port_held_by_another_worktree_fails_loudly() {
-    let fixture = Fixture::new();
-    let paths = paths(&fixture);
-    let config = Config::default();
-
-    let mut last = None;
-    for _ in 0..5 {
-        let wanted = free_port();
-        let owner = ports::ensure(
-            &paths,
-            &config,
-            "repo",
-            "owner",
-            fixture.path(),
-            &[PortRequest {
-                name: "web".to_string(),
-                prefer: Some(wanted),
-                require: None,
-            }],
-        )
-        .expect("allocate owner");
-        if owner.ports.get("web") != Some(&wanted) {
-            last = Some(wanted);
-            let _ = ports::reassign(&paths, "repo", "owner");
-            continue;
-        }
-
-        let error = ports::ensure(
-            &paths,
-            &config,
-            "repo",
-            "other",
-            fixture.path(),
-            &[PortRequest {
-                name: "oauth".to_string(),
-                prefer: None,
-                require: Some(wanted),
-            }],
-        )
-        .expect_err("must refuse a port another worktree holds");
-        assert!(error.to_string().contains("held by"), "{error}");
-        return;
-    }
-    panic!("a free preference was never honoured, last: {last:?}");
+    let again = ports::release(&paths, "repo", "wt-a").expect("release nothing");
+    assert!(again.is_none(), "releasing twice is not an error");
 }
 
 #[test]
@@ -470,6 +610,7 @@ fn configured_range_is_respected() {
         "main",
         fixture.path(),
         &[request("web"), request("api")],
+        None,
     )
     .expect("allocate");
 

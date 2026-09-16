@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::paths::Paths;
+use crate::repo::PRIMARY_WORKTREE_ID;
 use crate::slug::hash64;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,34 @@ use std::net::{TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
 pub const ASSIGNMENT_VERSION: u32 = 1;
+
+/// How a worktree's ports are chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum PortMode {
+    /// Every port a service declares as `prefer` is taken as declared. A
+    /// declared port is the primary checkout's own port: the repository's own
+    /// tooling, its generated `.env` files and anything registered against a
+    /// callback URL were written against it, so magictree uses it or says why
+    /// it cannot, rather than quietly moving the stack somewhere else.
+    #[default]
+    Declared,
+    /// Every port comes from this worktree's block, as if no `prefer` was
+    /// declared. What a linked worktree always does, and what a primary
+    /// checkout asks for with `up --ports generated` to keep a stack off the
+    /// ports the repository declares.
+    #[value(name = "generated", alias = "block")]
+    Block,
+}
+
+impl PortMode {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Block => "generated",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
@@ -22,6 +51,10 @@ pub struct Assignment {
     pub worktree_path: Option<String>,
     /// First port of the worktree's block.
     pub base: u16,
+    /// How these ports were chosen. Absent in assignments written before the
+    /// field existed; `ensure` then applies the mode this worktree defaults to.
+    #[serde(default)]
+    pub mode: PortMode,
     /// Qualified service name to allocated host port.
     pub ports: BTreeMap<String, u16>,
 }
@@ -41,6 +74,10 @@ enum BlockOutcome {
 
 /// Return this worktree's port assignment, allocating a block on first use and
 /// extending it when new services appear.
+///
+/// `requested` sets the mode, and changing it re-allocates: ports chosen under
+/// one rule mean nothing under the other, and the release has to happen in the
+/// same step that allocates or two worktrees can race for the freed block.
 pub fn ensure(
     paths: &Paths,
     config: &Config,
@@ -48,17 +85,26 @@ pub fn ensure(
     worktree_id: &str,
     worktree_path: &Path,
     requests: &[PortRequest],
+    requested: Option<PortMode>,
 ) -> Result<Assignment> {
     let blocks = paths.blocks_dir();
     std::fs::create_dir_all(&blocks).with_context(|| format!("creating {}", blocks.display()))?;
 
+    let primary = worktree_id == PRIMARY_WORKTREE_ID;
+    if !primary && requested == Some(PortMode::Declared) {
+        bail!(
+            "declared ports belong to the primary checkout; a linked worktree allocates from its \
+             block (`up --ports generated`)"
+        );
+    }
+
     let registry = read_registry(&blocks)?;
     // Every port another worktree recorded stays reserved, even while that
-    // worktree is stopped: a `prefer` port is outside its own block, so nothing
-    // else bounds it. Without this a second worktree takes the preferred port of
-    // a stopped one, and when the owner comes back its dead service is reported
+    // worktree is stopped: a declared port is outside its own block, so nothing
+    // else bounds it. Without this a second worktree takes the port of a
+    // stopped one, and when the owner comes back its dead service is reported
     // healthy by the new owner's process answering the probe. Released when the
-    // owning assignment is, by `ports --reassign` or `gc`.
+    // owning assignment is, by `ports --release`, `ports --reassign` or `gc`.
     let mut taken: HashMap<u16, String> = HashMap::new();
     for other in &registry {
         if other.repo_key == repo_key && other.worktree_id == worktree_id {
@@ -69,22 +115,35 @@ pub fn ensure(
         }
     }
 
-    if let Some(mut assignment) = registry
+    let mut existing = registry
         .iter()
         .find(|other| other.repo_key == repo_key && other.worktree_id == worktree_id)
-        .cloned()
-    {
+        .cloned();
+    let recorded = effective_mode(existing.as_ref(), primary);
+    let mode = requested.unwrap_or(recorded);
+    if requested.is_some() && mode != recorded {
+        if let Some(assignment) = &existing {
+            release_assignment(&blocks, assignment)?;
+            existing = None;
+        }
+    }
+
+    if let Some(mut assignment) = existing {
         let mut changed = false;
-        let recorded = Some(worktree_path.to_string_lossy().to_string());
-        if assignment.worktree_path != recorded {
-            assignment.worktree_path = recorded;
+        let recorded_path = Some(worktree_path.to_string_lossy().to_string());
+        if assignment.worktree_path != recorded_path {
+            assignment.worktree_path = recorded_path;
+            changed = true;
+        }
+        if assignment.mode != mode {
+            assignment.mode = mode;
             changed = true;
         }
         for request in requests {
             if assignment.ports.contains_key(&request.name) {
                 continue;
             }
-            let port = extend(config, &assignment, request, &taken)?;
+            let port = extend(config, &assignment, request, &taken, mode)?;
             assignment.ports.insert(request.name.clone(), port);
             changed = true;
         }
@@ -106,7 +165,7 @@ pub fn ensure(
         if path.exists() {
             continue;
         }
-        let ports = match assign_in_block(config, base, requests, &taken)? {
+        let ports = match assign_in_block(config, base, requests, &taken, mode)? {
             BlockOutcome::Assigned(ports) => ports,
             BlockOutcome::Unusable => continue,
         };
@@ -116,6 +175,7 @@ pub fn ensure(
             worktree_id: worktree_id.to_string(),
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
             base,
+            mode,
             ports,
         };
         if claim(&path, &assignment)? {
@@ -130,22 +190,40 @@ pub fn ensure(
     )
 }
 
+/// The mode an assignment was allocated under. An assignment written before the
+/// field existed has none recorded, and a linked worktree has only ever had one
+/// mode, so the default for this worktree answers for it.
+pub fn effective_mode(assignment: Option<&Assignment>, primary: bool) -> PortMode {
+    if !primary {
+        return PortMode::Block;
+    }
+    assignment
+        .map(|assignment| assignment.mode)
+        .unwrap_or(PortMode::Declared)
+}
+
 /// Read this worktree's existing assignment without allocating one.
 pub fn load(paths: &Paths, repo_key: &str, worktree_id: &str) -> Result<Option<Assignment>> {
     find_assignment(&paths.blocks_dir(), repo_key, worktree_id)
 }
 
-/// Drop this worktree's assignment so the next `up` allocates fresh ports.
-pub fn reassign(paths: &Paths, repo_key: &str, worktree_id: &str) -> Result<Option<PathBuf>> {
+/// Drop this worktree's assignment, so its ports stop being reserved for it and
+/// the next `up` allocates fresh ones.
+pub fn release(paths: &Paths, repo_key: &str, worktree_id: &str) -> Result<Option<PathBuf>> {
     let blocks = paths.blocks_dir();
     let Some(assignment) = find_assignment(&blocks, repo_key, worktree_id)? else {
         return Ok(None);
     };
-    let path = block_path(&blocks, assignment.base);
+    release_assignment(&blocks, &assignment)?;
+    Ok(Some(block_path(&blocks, assignment.base)))
+}
+
+fn release_assignment(blocks: &Path, assignment: &Assignment) -> Result<()> {
+    let path = block_path(blocks, assignment.base);
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
-    Ok(Some(path))
+    Ok(())
 }
 
 fn extend(
@@ -153,6 +231,7 @@ fn extend(
     assignment: &Assignment,
     request: &PortRequest,
     taken: &HashMap<u16, String>,
+    mode: PortMode,
 ) -> Result<u16> {
     let used: HashSet<u16> = assignment.ports.values().copied().collect();
     if let Some(required) = request.require {
@@ -174,7 +253,15 @@ fn extend(
         return Ok(required);
     }
     if let Some(preferred) = request.prefer {
-        if !used.contains(&preferred) && !taken.contains_key(&preferred) && port_free(preferred) {
+        if mode == PortMode::Declared {
+            if let Some(owner) = taken.get(&preferred) {
+                bail!(
+                    "port.prefer {preferred} for '{}' is held by worktree '{owner}'; release it \
+                     there with `magictree ports --release`, or run `magictree up --ports \
+                     generated` here",
+                    request.name
+                );
+            }
             return Ok(preferred);
         }
     }
@@ -200,6 +287,7 @@ fn assign_in_block(
     base: u16,
     requests: &[PortRequest],
     taken: &HashMap<u16, String>,
+    mode: PortMode,
 ) -> Result<BlockOutcome> {
     let mut ports = BTreeMap::new();
     let mut used = HashSet::new();
@@ -229,13 +317,27 @@ fn assign_in_block(
         if ports.contains_key(&request.name) {
             continue;
         }
-        if let Some(preferred) = request.prefer {
-            if !used.contains(&preferred) && !taken.contains_key(&preferred) && port_free(preferred)
-            {
-                used.insert(preferred);
-                ports.insert(request.name.clone(), preferred);
-            }
+        let Some(preferred) = request.prefer else {
+            continue;
+        };
+        if mode != PortMode::Declared {
+            continue;
         }
+        if used.contains(&preferred) {
+            bail!(
+                "port.prefer {preferred} is declared by more than one service; a declared port \
+                 names one service"
+            );
+        }
+        if let Some(owner) = taken.get(&preferred) {
+            bail!(
+                "port.prefer {preferred} for '{}' is held by worktree '{owner}'; release it there \
+                 with `magictree ports --release`, or run `magictree up --ports generated` here",
+                request.name
+            );
+        }
+        used.insert(preferred);
+        ports.insert(request.name.clone(), preferred);
     }
 
     let mut offset = 0u16;

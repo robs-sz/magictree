@@ -340,6 +340,29 @@ impl Ctx {
     }
 
     pub fn build_env(&self, app: Option<&str>, assignment: &Assignment) -> Result<EnvPlan> {
+        self.build_env_layers(app, assignment, false)
+    }
+
+    /// The layered environment for a dry run: the same shape as a real run, with
+    /// every port shown as a placeholder *in the computed layer*, so a value
+    /// that interpolates one (`WT_PORT_WEB = "${MAGICTREE_PORT_web_web}"`, a URL
+    /// built from a port) reads as a placeholder too instead of as the sentinel
+    /// number a preview assignment carries.
+    pub fn preview_plan(
+        &self,
+        app: Option<&str>,
+        mode: Option<ports::PortMode>,
+    ) -> Result<EnvPlan> {
+        let assignment = self.preview_assignment(mode);
+        self.build_env_layers(app, &assignment, true)
+    }
+
+    fn build_env_layers(
+        &self,
+        app: Option<&str>,
+        assignment: &Assignment,
+        preview: bool,
+    ) -> Result<EnvPlan> {
         let workspace_env = if self.loaded.root_is_app {
             &EMPTY_ENV
         } else {
@@ -363,7 +386,15 @@ impl Ctx {
                 }
             }
         }
-        env::build(self.computed_env(assignment), workspace_env, app_env)
+        let mut computed = self.computed_env(assignment);
+        if preview {
+            for value in computed.values_mut() {
+                if *value == PLACEHOLDER_PORT.to_string() {
+                    *value = PLACEHOLDER.to_string();
+                }
+            }
+        }
+        env::build(computed, workspace_env, app_env)
     }
 
     /// The service that publishes `variable` in `port.env`, when one does.
@@ -689,47 +720,33 @@ impl Ctx {
     }
 
     /// Environment for a dry run: same shape as a real run, with every
-    /// allocated port shown as a placeholder so nothing is claimed.
-    pub fn preview_env(&self) -> Result<EnvPlan> {
-        let assignment = self.preview_assignment();
-        let plan = self.build_env(self.loaded.current_app.as_deref(), &assignment)?;
-        Ok(self.with_placeholders(plan))
-    }
-
-    /// Names of every variable a declared `port.env` publishes in this stack.
-    fn declared_port_variable_names(&self) -> BTreeSet<String> {
-        self.nodes
-            .iter()
-            .filter_map(|node| node.service())
-            .flat_map(|service| service.ports())
-            .filter_map(|port| port.env)
-            .collect()
-    }
-
-    /// Replace the dry-run sentinel with a readable placeholder. Every port
-    /// shows as a placeholder, whether it arrives as `MAGICTREE_PORT_<name>` or
-    /// under the variable a service declared in `port.env`.
-    pub fn with_placeholders(&self, mut plan: EnvPlan) -> EnvPlan {
-        let declared = self.declared_port_variable_names();
-        for (key, value) in plan.vars.iter_mut() {
-            if *value != PLACEHOLDER_PORT.to_string() {
-                continue;
-            }
-            if key.starts_with("MAGICTREE_PORT_") || declared.contains(key) {
-                *value = PLACEHOLDER.to_string();
-            }
-        }
-        plan
+    /// allocated port shown as a placeholder so nothing is claimed. `mode` is
+    /// the one the run would ask for, so a preview of `up --ports generated`
+    /// does not show declared ports the run would not use.
+    pub fn preview_env(&self, mode: Option<ports::PortMode>) -> Result<EnvPlan> {
+        self.preview_plan(self.loaded.current_app.as_deref(), mode)
     }
 
     /// Placeholder port assignment used by dry runs; never written anywhere.
-    pub fn preview_assignment(&self) -> Assignment {
+    ///
+    /// A preview shows the ports the next real `up` would use, so a declared
+    /// port is previewed as itself only where it would be taken: a `prefer` is
+    /// the primary checkout's port, and a linked worktree ignores it. `mode` is
+    /// what the run would ask for, `None` being this worktree's default.
+    pub fn preview_assignment(&self, mode: Option<ports::PortMode>) -> Assignment {
+        let primary = self.repo.is_main_worktree();
+        let mode = mode.unwrap_or(if primary {
+            ports::PortMode::Declared
+        } else {
+            ports::PortMode::Block
+        });
         let mut assignment = Assignment {
             version: ports::ASSIGNMENT_VERSION,
             repo_key: self.repo.key(),
             worktree_id: self.repo.worktree_id(),
             worktree_path: Some(self.repo.worktree_root.to_string_lossy().to_string()),
             base: 0,
+            mode,
             ports: BTreeMap::new(),
         };
         for node in &self.nodes {
@@ -747,7 +764,11 @@ impl Ctx {
                 } else {
                     None
                 };
-                let fixed = port.require.or(port.prefer).unwrap_or(PLACEHOLDER_PORT);
+                let preferred = match mode {
+                    ports::PortMode::Declared => port.prefer,
+                    ports::PortMode::Block => None,
+                };
+                let fixed = port.require.or(preferred).unwrap_or(PLACEHOLDER_PORT);
                 assignment.ports.insert(self.port_key(node, name), fixed);
             }
         }
