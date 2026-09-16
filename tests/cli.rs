@@ -1114,6 +1114,53 @@ fn up_all_starts_every_app_even_inside_one() {
     assert!(down.ok(), "{}", down.combined());
 }
 
+/// Standing in an app narrows the selection to that app, never to a stack
+/// without the repository's shared infrastructure: an app started without the
+/// database it was written against crashes on boot.
+#[test]
+fn up_inside_an_app_still_starts_the_shared_infrastructure() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[workspace]
+apps = ["apps/api"]
+
+[[services]]
+id = "db"
+command = "sleep 300"
+port = { env = "DB_PORT" }
+"#,
+    );
+    fixture.write(
+        "apps/api/magictree.toml",
+        "version = 1\n\n[app]\nid = \"api\"\n\n[[services]]\nid = \"api\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let up = run(&["up"], &fixture.join("apps/api"), &state);
+    assert!(up.ok(), "{}", up.combined());
+    let db = up
+        .stdout
+        .find("db: started")
+        .unwrap_or_else(|| panic!("the shared database was not started:\n{}", up.stdout));
+    let api = up
+        .stdout
+        .find("api:api: started")
+        .unwrap_or_else(|| panic!("the app was not started:\n{}", up.stdout));
+    assert!(
+        db < api,
+        "the database starts before the app that reads it:\n{}",
+        up.stdout
+    );
+
+    let down = run(&["down"], fixture.path(), &state);
+    assert!(down.ok(), "{}", down.combined());
+}
+
 /// An app's bootstrap `inputs` name files inside the app, matching the working
 /// directory its command runs in: `uv.lock` means `apps/api/uv.lock`, not
 /// `uv.lock` at the worktree root, where no such file exists.

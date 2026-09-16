@@ -141,6 +141,14 @@ impl Ctx {
                             touched_apps.insert(app_id.clone());
                         }
                     }
+                    // Standing in an app narrows the selection to that app, not
+                    // to a stack without the repository's shared
+                    // infrastructure: the API in `api/` was written against the
+                    // database, cache and object store the workspace declares.
+                    for index in self.shared_service_indices() {
+                        chosen.insert(index);
+                        touched_workspace = true;
+                    }
                 }
                 _ => {
                     for (index, node) in self.nodes.iter().enumerate() {
@@ -184,11 +192,9 @@ impl Ctx {
             // infrastructure with it, so a running app is never left without
             // the database or cache it was written against.
             if !touched_apps.is_empty() {
-                for (index, node) in self.nodes.iter().enumerate() {
-                    if node.app.is_none() && node.is_running_service() {
-                        chosen.insert(index);
-                        touched_workspace = true;
-                    }
+                for index in self.shared_service_indices() {
+                    chosen.insert(index);
+                    touched_workspace = true;
                 }
             }
         }
@@ -216,6 +222,18 @@ impl Ctx {
             .iter()
             .enumerate()
             .filter(|(_, node)| node.is_running_service())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Repository-level services (`app = None`): the database, cache and object
+    /// store every app in the repository was written against, so any selection
+    /// inside an app comes with them.
+    fn shared_service_indices(&self) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node.app.is_none() && node.is_running_service())
             .map(|(index, _)| index)
             .collect()
     }
