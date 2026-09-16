@@ -51,6 +51,8 @@ pub enum Command {
     Up(UpArgs),
     /// Stop this worktree's stack. Volumes are kept unless --volumes.
     Down(DownArgs),
+    /// Stop the named services and start them again on their assigned ports.
+    Restart(RestartArgs),
     /// Remove a worktree after stopping its stack.
     Rm(RmArgs),
     /// List worktrees of this repository with their ports.
@@ -213,6 +215,16 @@ pub struct DownArgs {
 }
 
 #[derive(Args)]
+pub struct RestartArgs {
+    /// Services to restart (id or app:id). Dependencies are left alone; each
+    /// service keeps its assigned port and environment.
+    #[arg(required = true, value_name = "SERVICE")]
+    pub services: Vec<String>,
+    #[arg(long)]
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Args)]
 pub struct StatusArgs {
     /// Also run each service's health probe (may take a few seconds).
     #[arg(long)]
@@ -303,6 +315,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::New(args) => cmd_new(args, dry_run),
         Command::Up(args) => cmd_up(args, dry_run),
         Command::Down(args) => cmd_down(args, dry_run),
+        Command::Restart(args) => cmd_restart(args, dry_run),
         Command::Rm(args) => cmd_rm(args, dry_run),
         Command::List(args) => cmd_list(args),
         Command::Gc(args) => cmd_gc(args, dry_run),
@@ -1137,6 +1150,159 @@ fn cmd_down(args: DownArgs, dry_run: bool) -> Result<()> {
         let runner = ComposeRunner::new(file, None, project);
         runner.down(args.volumes, &env)?;
     }
+    Ok(())
+}
+
+/// Resolve the names given to `restart` into dependency-ordered indices.
+/// Nothing is pulled in: restart touches exactly the services named.
+fn restart_selection(ctx: &Ctx, names: &[String]) -> Result<Vec<usize>> {
+    let mut chosen = std::collections::BTreeSet::new();
+    for name in names {
+        let index = ctx
+            .nodes
+            .iter()
+            .position(|node| node.id == *name || node.qual() == *name)
+            .ok_or_else(|| anyhow!("unknown service '{name}'"))?;
+        if ctx.nodes[index].job().is_some() {
+            bail!("'{name}' is a job, not a service; only services can be restarted");
+        }
+        chosen.insert(index);
+    }
+    let selection: Vec<usize> = chosen.into_iter().collect();
+    manifest::order(&ctx.nodes, &ctx.edges, &selection)
+}
+
+/// Stop the named services — the host process, or the service's containers —
+/// and start them again on the ports and with the environment the worktree
+/// already has. Dependencies are not started and nothing else is touched, so a
+/// restart is safe while the rest of the stack keeps running; each service is
+/// waited to health in dependency order.
+fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
+    let mut ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
+    let selection = restart_selection(&ctx, &args.services)?;
+    if dry_run {
+        println!("dry run: nothing is restarted");
+        for &index in &selection {
+            let node = &ctx.nodes[index];
+            match node.runtime() {
+                Some(Runtime::Compose) => {
+                    let key = ctx
+                        .runner_key(node)
+                        .ok_or_else(|| anyhow!("{}: missing compose reference", node.qual()))?;
+                    let container = node
+                        .service()
+                        .and_then(|service| service.compose.as_ref())
+                        .expect("validated compose reference")
+                        .service
+                        .clone();
+                    println!(
+                        "{}: would run docker compose -f {} -p {} stop {container}, then up -d {container}",
+                        node.qual(),
+                        key.0.display(),
+                        key.1
+                    );
+                }
+                _ => {
+                    let pid = run::read_pid(&ctx.runtime_dir, &node.qual());
+                    let stopping = match pid {
+                        Some(pid) if run::is_alive(pid) => format!("stop (pid {pid}), then "),
+                        _ => String::new(),
+                    };
+                    println!("{}: would {}start again", node.qual(), stopping);
+                }
+            }
+        }
+        return Ok(());
+    }
+    // A restart keeps the worktree's assignment: ports and environment stay
+    // exactly as the stack had them, so nothing moves under its peers.
+    let assignment = ports::load(&ctx.paths, &ctx.repo.key(), &ctx.repo.worktree_id())?
+        .ok_or_else(|| anyhow!("no port assignment for this worktree; run `magictree up` first"))?;
+    ctx.adopt_legacy_runtime()?;
+    ctx.ensure_runtime_dirs()?;
+    let runners = ctx.compose_runners(&selection, &assignment)?;
+    if !runners.is_empty() {
+        compose::ensure_docker()?;
+    }
+
+    for &index in &selection {
+        let node = &ctx.nodes[index];
+        let env = ctx.node_env(node, &assignment)?;
+        let outcome = match node.runtime() {
+            Some(Runtime::Compose) => {
+                let key = ctx
+                    .runner_key(node)
+                    .ok_or_else(|| anyhow!("{}: missing compose reference", node.qual()))?;
+                let runner = runners
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("{}: no compose runner", node.qual()))?;
+                let service = node.service().expect("service node");
+                let container = service
+                    .compose
+                    .as_ref()
+                    .expect("validated compose reference")
+                    .service
+                    .clone();
+                println!("{}: restarting container", node.qual());
+                let started: Result<()> = (|| {
+                    // Only stop what exists: a service that was never started
+                    // (or was removed by `down`) just starts.
+                    let states = runner.ps(&env)?;
+                    if states.iter().any(|state| state.service == container) {
+                        runner.stop_service(&container, &env)?;
+                    }
+                    println!("{}: starting container", node.qual());
+                    runner.up_service(&container, &env)?;
+                    match service.wait {
+                        Wait::Exit => wait_for_exit(
+                            runner,
+                            &container,
+                            &env,
+                            Duration::from_secs(initializer_timeout(&ctx)),
+                        ),
+                        Wait::Running => {
+                            wait_ready(&ctx, node, &env, &assignment, Some((runner, &container)))
+                        }
+                    }
+                })();
+                match started {
+                    Ok(()) => Ok(Some(runner)),
+                    Err(error) => Err((Some(runner), error.to_string())),
+                }
+            }
+            _ => {
+                let started: Result<()> = (|| {
+                    if run::stop(
+                        &ctx.runtime_dir,
+                        &node.qual(),
+                        Duration::from_secs(ctx.config.stop_timeout_secs),
+                    )? {
+                        println!("{}: stopped", node.qual());
+                    } else {
+                        println!("{}: not running", node.qual());
+                    }
+                    let command = node
+                        .command()
+                        .ok_or_else(|| anyhow!("{}: no command or target", node.qual()))?;
+                    let pid =
+                        run::start(&ctx.runtime_dir, &node.qual(), &command, &node.dir, &env)?;
+                    println!("{}: started (pid {pid})", node.qual());
+                    wait_ready(&ctx, node, &env, &assignment, None)
+                })();
+                match started {
+                    Ok(()) => Ok(None),
+                    Err(error) => Err((None, error.to_string())),
+                }
+            }
+        };
+
+        if let Err((runner, reason)) = outcome {
+            let report = ctx.describe_failure(node, &assignment, runner, &reason);
+            return Err(anyhow!(report));
+        }
+    }
+
+    print_summary(&ctx, &selection, &assignment);
     Ok(())
 }
 

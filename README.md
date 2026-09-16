@@ -78,6 +78,7 @@ magictree ports              # this worktree's assignment
 magictree ports --release    # drop it: nothing stays reserved and no stack is touched
 magictree up --ports generated   # this checkout's stack, on its own block ports
 magictree down               # stop; volumes and ports are kept
+magictree restart web        # stop one service and start it again, on its own ports
 magictree rm feat/billing    # stop and remove the worktree; the branch is kept
 magictree gc                 # reclaim what deleted checkouts left behind
 ```
@@ -97,7 +98,7 @@ needs them (`up`, `ports`, `env`) allocates again.
 | | |
 |---|---|
 | `discover`, `init`, `doctor` | read the repository, write manifests, detect drift |
-| `up`, `down`, `status` | start, stop, inspect a worktree's stack |
+| `up`, `down`, `restart`, `status` | start, stop, restart specific services, inspect a worktree's stack |
 | `logs`, `env`, `ports` | service output, resolved environment, port assignment |
 | `exec` | run a command with this worktree's resolved environment |
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |

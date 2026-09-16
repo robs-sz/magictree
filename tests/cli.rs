@@ -1519,3 +1519,135 @@ port = {{ env = "PORT", prefer = {declared} }}
         generated.stdout
     );
 }
+
+/// The pid a status line reports, when the service is running.
+fn pid_in_status(text: &str, service: &str) -> Option<i32> {
+    text.lines()
+        .find(|line| line.split_whitespace().next() == Some(service))
+        .and_then(|line| {
+            line.split("pid ")
+                .nth(1)
+                .and_then(|rest| rest.split(')').next())
+                .and_then(|pid| pid.parse().ok())
+        })
+}
+
+#[test]
+fn restart_replaces_a_running_host_service() {
+    let fixture = host_stack_fixture();
+    let state = fixture.state_dir();
+
+    assert!(run(&["up"], fixture.path(), &state).ok());
+    let before = run(&["status"], fixture.path(), &state);
+    let old_pid = pid_in_status(&before.stdout, "idle").expect("pid before restart");
+
+    let restart = run(&["restart", "idle"], fixture.path(), &state);
+    assert!(restart.ok(), "{}", restart.combined());
+    assert!(
+        restart.stdout.contains("idle: stopped"),
+        "{}",
+        restart.stdout
+    );
+    assert!(
+        restart.stdout.contains("idle: started (pid"),
+        "{}",
+        restart.stdout
+    );
+
+    let after = run(&["status"], fixture.path(), &state);
+    let new_pid = pid_in_status(&after.stdout, "idle").expect("pid after restart");
+    assert_ne!(new_pid, old_pid, "restart must start a new process");
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn restart_starts_a_stopped_service_again() {
+    // A restart never moves ports: the assignment outlives `down`, and the
+    // service comes back on the port it had.
+    let fixture = host_stack_fixture();
+    let state = fixture.state_dir();
+
+    assert!(run(&["up"], fixture.path(), &state).ok());
+    let port_before = run(&["ports"], fixture.path(), &state).stdout;
+    assert!(run(&["down"], fixture.path(), &state).ok());
+
+    let restart = run(&["restart", "idle"], fixture.path(), &state);
+    assert!(restart.ok(), "{}", restart.combined());
+    assert!(
+        restart.stdout.contains("idle: not running"),
+        "{}",
+        restart.stdout
+    );
+    assert!(
+        restart.stdout.contains("idle: started (pid"),
+        "{}",
+        restart.stdout
+    );
+
+    let port_after = run(&["ports"], fixture.path(), &state).stdout;
+    assert_eq!(port_before, port_after, "a restart keeps the assignment");
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn restart_rejects_unknown_names_jobs_and_missing_assignments() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[[services]]
+id = "idle"
+command = "sleep 300"
+port = { env = "PORT" }
+
+[jobs.seed]
+run = "echo seeded"
+when = "manual"
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let unknown = run(&["restart", "nosuch"], fixture.path(), &state);
+    assert!(!unknown.ok(), "{}", unknown.combined());
+    assert!(
+        unknown.combined().contains("unknown service 'nosuch'"),
+        "{}",
+        unknown.combined()
+    );
+
+    let job = run(&["restart", "seed"], fixture.path(), &state);
+    assert!(!job.ok(), "{}", job.combined());
+    assert!(job.combined().contains("is a job"), "{}", job.combined());
+
+    // Without a stack there is nothing to restart onto: the assignment, the
+    // ports and the environment a restart needs do not exist yet.
+    let cold = run(&["restart", "idle"], fixture.path(), &state);
+    assert!(!cold.ok(), "{}", cold.combined());
+    assert!(
+        cold.combined().contains("run `magictree up` first"),
+        "{}",
+        cold.combined()
+    );
+}
+
+#[test]
+fn a_dry_run_of_restart_creates_nothing() {
+    let fixture = host_stack_fixture();
+    let state = fixture.state_dir();
+
+    let plan = run(&["--dry-run", "restart", "idle"], fixture.path(), &state);
+    assert!(plan.ok(), "{}", plan.combined());
+    assert!(plan.stdout.contains("dry run"), "{}", plan.stdout);
+    assert!(plan.stdout.contains("idle"), "{}", plan.stdout);
+    assert!(plan.stdout.contains("would start again"), "{}", plan.stdout);
+
+    assert!(
+        runtime_dirs(&state).is_empty(),
+        "a dry run must not create worktree state"
+    );
+}

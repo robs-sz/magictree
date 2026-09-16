@@ -92,6 +92,7 @@ magictree up            # allocate ports, bootstrap, start services, wait for he
 magictree status        # what is running, on which port
 magictree ports         # the port assignment as URLs
 magictree logs web -f   # follow one service's output
+magictree restart web   # stop one service and start it again; deps untouched, health awaited
 magictree down          # stop everything, keep volumes
 ```
 

@@ -92,6 +92,13 @@ impl ComposeRunner {
         self.run(&["up", "-d", service], env).map(|_| ())
     }
 
+    /// Stop one service's containers, keeping them: the next `up -d` starts
+    /// them again with fresh configuration. A service with no container is a
+    /// no-op.
+    pub fn stop_service(&self, service: &str, env: &BTreeMap<String, String>) -> Result<()> {
+        self.run(&["stop", service], env).map(|_| ())
+    }
+
     pub fn down(&self, volumes: bool, env: &BTreeMap<String, String>) -> Result<()> {
         let mut args = vec!["down", "--remove-orphans"];
         if volumes {
