@@ -927,9 +927,14 @@ fn ensure(
         }
         if !steps.run.is_empty() {
             let env = ctx.build_env(app.as_deref(), &assignment)?;
-            for message in
-                bootstrap::run_steps(&ctx.runtime_dir, &dir, "bootstrap", &steps.run, &env.vars)?
-            {
+            for message in bootstrap::run_steps(
+                &ctx.runtime_dir,
+                &dir,
+                "bootstrap",
+                &steps.run,
+                &env.vars,
+                &bootstrap::prompt,
+            )? {
                 println!("{message}");
             }
         }
@@ -1037,9 +1042,14 @@ fn ensure(
             continue;
         }
         let env = ctx.build_env(app.as_deref(), &assignment)?;
-        for message in
-            bootstrap::run_steps(&ctx.runtime_dir, &dir, "after", &steps.after, &env.vars)?
-        {
+        for message in bootstrap::run_steps(
+            &ctx.runtime_dir,
+            &dir,
+            "after",
+            &steps.after,
+            &env.vars,
+            &bootstrap::prompt,
+        )? {
             println!("{message}");
         }
     }

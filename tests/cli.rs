@@ -1651,3 +1651,64 @@ fn a_dry_run_of_restart_creates_nothing() {
         "a dry run must not create worktree state"
     );
 }
+
+#[test]
+fn after_steps_marked_ask_are_declined_without_a_terminal() {
+    // A run without a terminal — scripts, agents, CI — must neither block nor
+    // answer the prompt itself: the step is skipped and nothing is cached.
+    let fixture = Fixture::new();
+    let marker = fixture.state_dir().join("seeded.txt");
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"
+version = 1
+
+[bootstrap]
+after = [
+  {{ command = "echo seeded > '{}'", ask = true }},
+]
+
+[[services]]
+id = "idle"
+command = "sleep 300"
+port = {{ env = "PORT" }}
+"#,
+            marker.display()
+        ),
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let plan = run(&["--dry-run", "up"], fixture.path(), &state);
+    assert!(plan.ok(), "{}", plan.combined());
+    assert!(
+        plan.stdout.contains("asks before running"),
+        "the plan has to say the step asks:\n{}",
+        plan.stdout
+    );
+
+    let up = run(&["up"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        !marker.exists(),
+        "a declined after step must not run:\n{}",
+        up.combined()
+    );
+    assert!(
+        up.stdout.contains("skipped"),
+        "the decline has to be visible:\n{}",
+        up.stdout
+    );
+
+    // A decline is never cached: the next run asks again.
+    let again = run(&["up"], fixture.path(), &state);
+    assert!(again.ok(), "{}", again.combined());
+    assert!(
+        !marker.exists() && again.stdout.contains("skipped"),
+        "a declined step must stay uncached:\n{}",
+        again.stdout
+    );
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}

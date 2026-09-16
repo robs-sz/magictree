@@ -74,12 +74,17 @@ pub fn sync_files(
 /// `phase` names the phase in messages only: the cache entry belongs to the
 /// manifest that declared the command and to the command itself, so the same
 /// command in `run` and in `after` means the same thing by `inputs`.
+///
+/// Steps marked `ask` run only when `confirm` says yes; a decline skips the
+/// step and caches nothing, so the next run asks again. A cached step never
+/// reaches `confirm`: there is nothing to decide.
 pub fn run_steps(
     runtime_dir: &Path,
     manifest_dir: &Path,
     phase: &str,
     steps: &[crate::manifest::RunStep],
     env: &BTreeMap<String, String>,
+    confirm: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<String>> {
     let mut state = load_state(runtime_dir);
     let mut messages = Vec::new();
@@ -88,23 +93,49 @@ pub fn run_steps(
         // Two apps can declare the same command with different inputs, so the
         // cache entry belongs to the manifest that declared it.
         let key = format!("{}::{command}", manifest_dir.display());
-        if !step.inputs().is_empty() {
-            let digest = inputs_digest(manifest_dir, step.inputs())?;
+        let digest = if step.inputs().is_empty() {
+            None
+        } else {
+            Some(inputs_digest(manifest_dir, step.inputs())?)
+        };
+        if let Some(digest) = &digest {
             if state.bootstrap.get(&key).map(String::as_str) == Some(digest.as_str()) {
                 messages.push(format!("run {command}: cached"));
                 continue;
             }
-            run::run_once(command, manifest_dir, env)
-                .with_context(|| format!("{phase} step '{command}' failed"))?;
+        }
+        if step.asks() && !confirm(command) {
+            messages.push(format!("run {command}: skipped"));
+            continue;
+        }
+        run::run_once(command, manifest_dir, env)
+            .with_context(|| format!("{phase} step '{command}' failed"))?;
+        if let Some(digest) = digest {
             state.bootstrap.insert(key, digest);
-        } else {
-            run::run_once(command, manifest_dir, env)
-                .with_context(|| format!("{phase} step '{command}' failed"))?;
         }
         messages.push(format!("run {command}: ok"));
     }
     save_state(runtime_dir, &state)?;
     Ok(messages)
+}
+
+/// The question `up` puts before a step marked `ask`. Anything but y/yes skips
+/// the step, and a run without a terminal — scripts, agents, CI — always
+/// declines, so an unattended `up` neither blocks nor runs unconfirmed work.
+pub fn prompt(command: &str) -> bool {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return false;
+    }
+    print!("Run task: {command} (y/N) ");
+    if std::io::stdout().flush().is_err() {
+        return false;
+    }
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 fn inputs_digest(manifest_dir: &Path, inputs: &[String]) -> Result<String> {
@@ -149,4 +180,111 @@ fn hash_dir(hasher: &mut Sha256, dir: &Path) -> Result<()> {
         // Sockets and other specials contribute their name only.
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::RunStep;
+
+    fn step(command: &str, inputs: &[&str], ask: bool) -> RunStep {
+        RunStep::Detailed {
+            command: command.to_string(),
+            inputs: inputs.iter().map(|input| input.to_string()).collect(),
+            ask,
+        }
+    }
+
+    #[test]
+    fn an_asked_step_runs_only_on_a_yes() {
+        let worktree = tempfile::tempdir().expect("temp dir");
+        let runtime = worktree.path().join("runtime");
+        std::fs::create_dir_all(&runtime).expect("runtime dir");
+        let marker = worktree.path().join("marker");
+        let command = format!("echo done > {}", marker.display());
+
+        let declined = run_steps(
+            &runtime,
+            worktree.path(),
+            "after",
+            &[step(&command, &[], true)],
+            &BTreeMap::new(),
+            &|_| false,
+        )
+        .expect("run_steps");
+        assert_eq!(declined, vec![format!("run {command}: skipped")]);
+        assert!(!marker.exists(), "a declined step must not run");
+
+        let accepted = run_steps(
+            &runtime,
+            worktree.path(),
+            "after",
+            &[step(&command, &[], true)],
+            &BTreeMap::new(),
+            &|_| true,
+        )
+        .expect("run_steps");
+        assert_eq!(accepted, vec![format!("run {command}: ok")]);
+        assert!(marker.exists(), "an accepted step runs");
+    }
+
+    #[test]
+    fn a_cached_step_is_never_asked_about() {
+        let worktree = tempfile::tempdir().expect("temp dir");
+        let runtime = worktree.path().join("runtime");
+        std::fs::create_dir_all(&runtime).expect("runtime dir");
+        std::fs::write(worktree.path().join("input.txt"), "v1").expect("input");
+
+        let messages = run_steps(
+            &runtime,
+            worktree.path(),
+            "after",
+            &[step("true", &["input.txt"], true)],
+            &BTreeMap::new(),
+            &|_| true,
+        )
+        .expect("first run");
+        assert_eq!(messages, vec!["run true: ok"]);
+
+        let again = run_steps(
+            &runtime,
+            worktree.path(),
+            "after",
+            &[step("true", &["input.txt"], true)],
+            &BTreeMap::new(),
+            &|_| panic!("a cached step must not be asked about"),
+        )
+        .expect("second run");
+        assert_eq!(again, vec!["run true: cached"]);
+    }
+
+    #[test]
+    fn a_declined_step_is_not_cached() {
+        let worktree = tempfile::tempdir().expect("temp dir");
+        let runtime = worktree.path().join("runtime");
+        std::fs::create_dir_all(&runtime).expect("runtime dir");
+        std::fs::write(worktree.path().join("input.txt"), "v1").expect("input");
+
+        run_steps(
+            &runtime,
+            worktree.path(),
+            "after",
+            &[step("true", &["input.txt"], true)],
+            &BTreeMap::new(),
+            &|_| false,
+        )
+        .expect("declined run");
+
+        // The decline cached nothing, so a later yes runs the step.
+        let messages = run_steps(
+            &runtime,
+            worktree.path(),
+            "after",
+            &[step("true", &["input.txt"], true)],
+            &BTreeMap::new(),
+            &|_| true,
+        )
+        .expect("later run");
+        assert_eq!(messages, vec!["run true: ok"]);
+    }
 }

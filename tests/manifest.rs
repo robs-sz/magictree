@@ -529,3 +529,47 @@ when = "manual"
     assert!(!job.is_running_service());
     assert_eq!(job.needs(), ["db".to_string()]);
 }
+
+#[test]
+fn an_after_step_can_ask_before_running() {
+    // `ask = true` is per step; a bare string step and a detailed one with
+    // inputs keep parsing exactly as before.
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[bootstrap]
+after = [
+  "echo plain",
+  { command = "echo asked", ask = true },
+  { command = "echo cached", inputs = ["input.txt"], ask = true },
+]
+
+[[services]]
+id = "web"
+command = "python3 -m http.server $PORT"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let loaded = Loaded::load(fixture.path()).expect("load");
+    loaded.validate().expect("valid");
+
+    // A standalone manifest is the app's own, wherever `Loaded` files it.
+    let after = loaded
+        .apps
+        .iter()
+        .map(|app| &app.manifest.bootstrap.after)
+        .chain(std::iter::once(&loaded.workspace.bootstrap.after))
+        .find(|after| !after.is_empty())
+        .expect("after steps");
+    assert_eq!(after.len(), 3);
+    assert_eq!(after[0].command(), "echo plain");
+    assert!(!after[0].asks(), "a bare string never asks");
+    assert_eq!(after[1].command(), "echo asked");
+    assert!(after[1].asks());
+    assert_eq!(after[2].inputs(), ["input.txt".to_string()]);
+    assert!(after[2].asks());
+}

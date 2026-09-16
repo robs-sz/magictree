@@ -254,6 +254,10 @@ Rules that matter:
   belongs in `[bootstrap] after`, which runs once every selected service is healthy:
   `when = "up"` only waits for its own `needs`. Both take the same step shape, `inputs`
   included.
+- A step with `ask = true` asks before it runs: `up` prints `Run task: <command> (y/N)` and
+  runs it only on y/yes. A decline is cached nowhere, so the next run asks again, and a run
+  without a terminal (scripts, agents, CI) always declines. Use it for an after step you only
+  sometimes want, like a smoke test or a browser session.
 - A one-shot compose initialiser (provisioning, migrations) needs `wait = "exit"`, so
   `up` waits for it to finish successfully instead of moving on while it runs.
 - Services that derive their own URLs from a port (`${WT_PORT_AUTH}` in another

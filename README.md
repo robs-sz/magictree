@@ -296,6 +296,19 @@ runs, a step that fails still leaves the running stack and its addresses on scre
 `when = "up"` job is the wrong tool for this: it runs as soon as its own `needs` are healthy,
 which is early in a partial `up`.
 
+A step marked `ask = true` asks before it runs: `up` prints `Run task: <command> (y/N)` and
+runs the step only on a yes. A decline — and a run without a terminal, such as a script, an
+agent, or CI — skips the step and caches nothing, so the next `up` asks again. A cached step
+(`inputs` unchanged) is never asked about.
+
+```toml
+[bootstrap]
+after = [
+  "pnpm db:seed",
+  { command = "pnpm test:smoke", ask = true },   # opt in per run: Run task: pnpm test:smoke (y/N)
+]
+```
+
 Both `sync` paths and `inputs` are relative to the manifest that declares them, matching the
 directory its commands run in: an app manifest's `sync = ["node_modules"]` links the app's own
 `node_modules`, and its `inputs = ["uv.lock"]` means the app's `uv.lock`. A root manifest's

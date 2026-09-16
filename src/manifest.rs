@@ -63,6 +63,11 @@ pub enum RunStep {
         command: String,
         #[serde(default)]
         inputs: Vec<String>,
+        /// Ask before running: `up` prints `Run task: <command> (y/N)` and
+        /// runs the step only on a yes. A run without a terminal — scripts,
+        /// agents, CI — always declines, so nothing unattended is run.
+        #[serde(default)]
+        ask: bool,
     },
 }
 
@@ -78,6 +83,13 @@ impl RunStep {
         match self {
             RunStep::Simple(_) => &[],
             RunStep::Detailed { inputs, .. } => inputs,
+        }
+    }
+
+    pub fn asks(&self) -> bool {
+        match self {
+            RunStep::Simple(_) => false,
+            RunStep::Detailed { ask, .. } => *ask,
         }
     }
 }

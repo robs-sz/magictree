@@ -266,11 +266,14 @@ pub fn up(ctx: &Ctx, selection: &[usize], mode: Option<ports::PortMode>) -> Resu
 
 /// One bootstrap step in the plan, with what decides whether it runs.
 fn print_step(step: &RunStep) {
-    let marker = if step.inputs().is_empty() {
+    let mut marker = if step.inputs().is_empty() {
         "always runs".to_string()
     } else {
         format!("skipped when unchanged: {}", step.inputs().join(", "))
     };
+    if step.asks() {
+        marker.push_str(", asks before running");
+    }
     println!("  run   {}   ({marker})", step.command());
 }
 
