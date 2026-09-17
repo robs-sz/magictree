@@ -41,6 +41,12 @@ impl Paths {
     pub fn config_file(&self) -> PathBuf {
         self.config_dir.join("config.toml")
     }
+
+    /// What the last release check found, and when it ran. Machine-global like
+    /// the rest of the state, because the binary is.
+    pub fn update_check_file(&self) -> PathBuf {
+        self.state_dir.join("update-check.json")
+    }
 }
 
 /// Move a directory into place, falling back to a copy when source and

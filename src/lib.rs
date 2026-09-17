@@ -22,6 +22,7 @@ pub mod ports;
 pub mod repo;
 pub mod run;
 pub mod slug;
+pub mod update;
 pub mod worktrees;
 
 pub use cli::{dispatch, parse, Cli};

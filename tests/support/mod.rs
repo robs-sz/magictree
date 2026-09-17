@@ -119,13 +119,37 @@ impl Run {
 
 /// Run the binary with an isolated state directory.
 pub fn run(args: &[&str], cwd: &Path, state: &Path) -> Run {
-    let output = Command::new(bin())
+    finish(command(args, cwd, state).output().expect("run magictree"))
+}
+
+/// The same run, with the update check left on.
+///
+/// `run` turns the check off so that no test reaches GitHub. A test that seeds
+/// the check's cache can leave it on and stay offline, which is what this is
+/// for: it is the only way to see the notice a command prints.
+pub fn run_notifying(args: &[&str], cwd: &Path, state: &Path) -> Run {
+    finish(
+        command(args, cwd, state)
+            .env_remove("MAGICTREE_NO_UPDATE_CHECK")
+            .output()
+            .expect("run magictree"),
+    )
+}
+
+fn command(args: &[&str], cwd: &Path, state: &Path) -> Command {
+    let mut command = Command::new(bin());
+    command
         .args(args)
         .current_dir(cwd)
         .env("MAGICTREE_STATE_DIR", state)
         .env("MAGICTREE_CONFIG_DIR", state.join("config"))
-        .output()
-        .expect("run magictree");
+        // A test must never ask GitHub for a release: the check is off unless
+        // a test asks for it, and then it seeds the cache first.
+        .env("MAGICTREE_NO_UPDATE_CHECK", "1");
+    command
+}
+
+fn finish(output: Output) -> Run {
     Run {
         status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),

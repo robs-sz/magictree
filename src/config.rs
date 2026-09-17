@@ -40,6 +40,9 @@ pub struct Config {
     pub health_timeout_secs: u64,
     /// Whether `up` and `restart` build the compose services they start.
     pub build: BuildMode,
+    /// Whether a command may mention a release that has landed since this
+    /// binary was installed.
+    pub check_for_updates: bool,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Default for Config {
             stop_timeout_secs: 10,
             health_timeout_secs: 60,
             build: BuildMode::default(),
+            check_for_updates: true,
         }
     }
 }

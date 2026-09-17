@@ -13,6 +13,7 @@ use crate::paths::Paths;
 use crate::ports;
 use crate::repo::Repo;
 use crate::run;
+use crate::update;
 use crate::worktrees;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -71,6 +72,8 @@ pub enum Command {
     Exec(ExecArgs),
     /// Print a shell completion script.
     Completion(CompletionArgs),
+    /// Install the latest release over this binary.
+    Update(UpdateArgs),
 }
 
 #[derive(Args)]
@@ -78,6 +81,16 @@ pub struct CompletionArgs {
     /// Shell to generate completions for.
     #[arg(value_enum)]
     pub shell: clap_complete::Shell,
+}
+
+#[derive(Args)]
+pub struct UpdateArgs {
+    /// Say whether a newer release exists, and install nothing.
+    #[arg(long, short = 'c')]
+    pub check: bool,
+    /// Install the latest release even when this binary is that version.
+    #[arg(long, short = 'f')]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -327,7 +340,10 @@ pub fn parse() -> Cli {
 
 pub fn dispatch(cli: Cli) -> Result<()> {
     let dry_run = cli.dry_run;
-    match cli.command {
+    // `update` is about the binary itself, a failed command has said enough of
+    // its own, and a dry run writes nothing — not even the check's cache.
+    let announce = !dry_run && !matches!(cli.command, Command::Update(_));
+    let outcome = match cli.command {
         Command::Discover(args) => cmd_discover(args, dry_run),
         Command::Init(args) => cmd_init(args, dry_run),
         Command::Doctor(args) => cmd_doctor(args),
@@ -344,7 +360,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Env(args) => cmd_env(args, dry_run),
         Command::Exec(args) => cmd_exec(args, dry_run),
         Command::Completion(args) => cmd_completion(args),
+        Command::Update(args) => cmd_update(args, dry_run),
+    };
+    if announce && outcome.is_ok() {
+        update::notice();
     }
+    outcome
 }
 
 /// Print a completion script to stdout. Install it with, for example:
@@ -354,6 +375,43 @@ fn cmd_completion(args: CompletionArgs) -> Result<()> {
     let mut command = Cli::command();
     let name = command.get_name().to_string();
     clap_complete::generate(args.shell, &mut command, name, &mut std::io::stdout());
+    Ok(())
+}
+
+/// Replace this binary with the release the repository publishes for it.
+///
+/// The download is staged beside the binary and moved into place only once it
+/// has proved that it runs, so a failed or interrupted update is a no-op.
+fn cmd_update(args: UpdateArgs, dry_run: bool) -> Result<()> {
+    let release = update::latest()?;
+    let (current, latest) = (update::VERSION, release.version());
+    let stale = update::is_newer(latest, current);
+    if args.check {
+        if stale {
+            println!("magictree {latest} is available (this is {current})");
+        } else {
+            println!("magictree {current} is the latest release");
+        }
+    } else if !stale && !args.force {
+        println!("magictree {current} is the latest release");
+    } else {
+        let artifact = release.artifact()?;
+        if dry_run {
+            println!(
+                "dry run: nothing is downloaded or written\n\nwould install {artifact} over {}",
+                update::running_binary()?.display()
+            );
+            return Ok(());
+        }
+        println!("magictree {current} -> {latest}");
+        println!("downloading {artifact}");
+        let installed = update::install(&release)?;
+        println!("installed to {}", installed.display());
+    }
+    // The answer stands for a day, and the user has just seen it.
+    if !dry_run {
+        update::remember(latest);
+    }
     Ok(())
 }
 

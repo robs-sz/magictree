@@ -327,3 +327,22 @@ Common causes:
   port blocks, compose containers and volumes, and the host processes whose pid files
   only survive because the state is kept outside the checkout. Run it after removing
   checkouts outside magictree.
+
+## Updating magictree
+
+The installed binary is the authority on flags, and updating it is the user's call:
+
+```bash
+magictree update          # install the latest release over the binary that is running
+magictree update --check  # say whether a newer release exists; install nothing
+```
+
+A command that ends with
+
+```
+magictree 0.1.3 is available (this is 0.1.2); run `magictree update`
+```
+
+is telling the user a release has landed since magictree was installed. Say so and carry on;
+do not install it unless asked. Never fetch a release by hand either, or point the user at a
+package manager: `update` is the way, and it replaces whichever file is running.

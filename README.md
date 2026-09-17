@@ -113,6 +113,7 @@ service that only names an `image:` is never built and never asked about.
 | `exec` | run a command with this worktree's resolved environment |
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |
 | `completion` | a shell completion script, printed to stdout |
+| `update` | install the latest release over this binary |
 
 `--dry-run` works on every command and creates nothing: `magictree -n up`.
 
@@ -148,6 +149,45 @@ zsh loads a completion only from a directory on `$fpath`, so `~/.zsh/completions
 completion, and open a new shell. A shell that was already running reuses its `~/.zcompdump`,
 keeps the registration even when the file it names has moved, and fails on Tab with
 `_magictree: function definition file not found` until the shell is restarted.
+
+## Updating
+
+`magictree update` replaces the binary that is running with the latest release built for it —
+the artifact for the triple magictree was compiled for, never another platform's:
+
+```sh
+magictree update          # install the latest release
+magictree update --check  # say whether one exists, and install nothing
+magictree update --force  # reinstall the latest release over this one
+```
+
+The release is downloaded from GitHub and put in place only after the new binary has proved
+that it runs and reports the version it should. A download that is truncated, built for
+another machine, or no longer matches the digest the release publishes leaves the installed
+magictree exactly as it was, and `magictree -n update` prints the artifact and the file it
+would replace without downloading anything. The replacement is a rename beside the old file,
+so nothing has to be restarted and a running stack keeps running.
+
+The file replaced is the one that is running, wherever it is: `~/.local/bin`, `~/.cargo/bin`,
+`/usr/local/bin`. Where that directory belongs to another user, `update` says so and names
+`sudo`.
+
+Every other command ends by naming a release that has landed since this binary was installed,
+and how to install it:
+
+```
+magictree 0.1.3 is available (this is 0.1.2); run `magictree update`
+```
+
+The answer is kept for a day in `~/.local/state/magictree/update-check.json`, so at most one
+command a day asks GitHub anything; a check that reached nothing is retried half an hour later
+rather than on every command, and a check that fails is never an error the command reports.
+The notice is the last line on stderr — stdout, the part a script reads, is untouched.
+
+Two switches turn the notice off, for a machine that never reaches GitHub and for anything
+that has no business asking: `check_for_updates = false` in `~/.config/magictree/config.toml`,
+and `MAGICTREE_NO_UPDATE_CHECK` set to anything but `0` in the environment. `magictree update`
+works either way.
 
 ## Manifest
 
@@ -378,6 +418,7 @@ so the file itself is optional.
 | `stop_timeout_secs` | `10` | Grace period after SIGTERM before a host process is killed. |
 | `health_timeout_secs` | `60` | Default health-probe timeout, in seconds. |
 | `build` | `"always"` | Whether `up` and `restart` build the compose services they start: `"always"`, `"ask"`, or `"never"`. `--build` and `--no-build` override it for one run. |
+| `check_for_updates` | `true` | Whether a command may end by naming a release that has landed since this binary was installed. |
 
 ## Layout
 
@@ -385,8 +426,9 @@ so the file itself is optional.
 |---|---|
 | `magictree.toml` | committed per app; a root one with `[workspace]` for monorepos |
 | `~/.local/state/magictree/blocks/` | machine-wide port assignments |
+| `~/.local/state/magictree/update-check.json` | what the last release check found, and when it ran |
 | `~/.local/state/magictree/worktrees/<repo>/<worktree>/` | generated per worktree: `env`, `ports.json`, `run/`, `log/` |
-| `~/.config/magictree/config.toml` | optional: port range, timeouts, build mode |
+| `~/.config/magictree/config.toml` | optional: port range, timeouts, build mode, update check |
 
 Ports come from `20000-32767`, are stable across restarts, and are never visible inside
 containers. A port the primary checkout declares with `prefer` is wherever the manifest says
