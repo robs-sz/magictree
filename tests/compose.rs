@@ -242,3 +242,31 @@ fn gc_keeps_a_live_worktrees_container_and_volume() {
     );
     assert_eq!(project.volumes().len(), 1, "and so does its data volume");
 }
+
+#[test]
+fn down_volumes_removes_the_worktrees_volume() {
+    // `down` keeps the data volume by default; `--volumes` is what destroys it.
+    // The second teardown also covers the case a first `down` leaves behind:
+    // no containers to read the project from, only the compose file's declared
+    // volumes, which is where a Compose that derives the list from containers
+    // would lose them.
+    if !docker_ready() {
+        return;
+    }
+    let (fixture, worktree) = compose_fixture("mtcg-down-volumes");
+    let project = Project("mtcg-down-volumes".to_string());
+    let state = fixture.state_dir();
+    let up = support::run(&["up"], &worktree, &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert_eq!(project.containers().len(), 1, "the service is up");
+    assert_eq!(project.volumes().len(), 1, "and owns a volume");
+
+    let kept = support::run(&["down"], &worktree, &state);
+    assert!(kept.ok(), "{}", kept.combined());
+    assert!(project.containers().is_empty(), "the containers are gone");
+    assert_eq!(project.volumes().len(), 1, "the volume is kept");
+
+    let removed = support::run(&["down", "--volumes"], &worktree, &state);
+    assert!(removed.ok(), "{}", removed.combined());
+    assert!(project.volumes().is_empty(), "the volume is gone");
+}
