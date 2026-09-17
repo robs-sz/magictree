@@ -93,6 +93,16 @@ needs them (`up`, `ports`, `env`) allocates again.
 `rm` accepts a path, a branch name, or a directory name, refuses a dirty worktree unless
 `--force`, and never deletes a branch.
 
+`up` and `restart` build the compose services they start, so a changed Dockerfile or build
+context is picked up by running `magictree up` again. There is no cheap way to ask Docker
+whether an image is stale (only the builder knows, and it knows by validating its cache), so
+the build *is* the check: an unchanged context is a cache hit, not a rebuild.
+
+`build` in `~/.config/magictree/config.toml` decides whether that happens: `"always"` (the
+default), `"ask"` — one question per run, naming the services that would build, declined when
+there is no terminal — or `"never"`. `--build` and `--no-build` override it for one run. A
+service that only names an `image:` is never built and never asked about.
+
 ## Commands
 
 | | |
@@ -104,7 +114,13 @@ needs them (`up`, `ports`, `env`) allocates again.
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |
 | `completion` | a shell completion script, printed to stdout |
 
-`--dry-run` works on every command and creates nothing.
+`--dry-run` works on every command and creates nothing: `magictree -n up`.
+
+Flags with an unambiguous short form carry one — `-n` for `--dry-run`, `-C` for `--cwd`,
+`-f` for `--force`, `-v` for `--volumes`, `-b` for `--build`, `-e` for `--export`, `-A` for
+`--all`, and so on.
+A letter is only reused where the command has no clash, so each command's `--help` is the
+list for that command.
 
 ```sh
 magictree exec -- just api::seed    # run a command as if the stack had launched it
@@ -349,6 +365,20 @@ workspace-level ones by their bare id (`db`); a `needs` entry resolves inside it
 first, then at the workspace. [`examples/monorepo`](examples/monorepo/README.md) is a complete
 one.
 
+## Configuration
+
+Optional machine-wide settings at `~/.config/magictree/config.toml`. Every key has a default,
+so the file itself is optional.
+
+| key | default | meaning |
+|---|---|---|
+| `port_range_start` | `20000` | Inclusive start of the range worktree blocks are allocated from. |
+| `port_range_end` | `32767` | Inclusive end of that range. |
+| `port_stride` | `20` | Ports reserved per worktree block. |
+| `stop_timeout_secs` | `10` | Grace period after SIGTERM before a host process is killed. |
+| `health_timeout_secs` | `60` | Default health-probe timeout, in seconds. |
+| `build` | `"always"` | Whether `up` and `restart` build the compose services they start: `"always"`, `"ask"`, or `"never"`. `--build` and `--no-build` override it for one run. |
+
 ## Layout
 
 | | |
@@ -356,7 +386,7 @@ one.
 | `magictree.toml` | committed per app; a root one with `[workspace]` for monorepos |
 | `~/.local/state/magictree/blocks/` | machine-wide port assignments |
 | `~/.local/state/magictree/worktrees/<repo>/<worktree>/` | generated per worktree: `env`, `ports.json`, `run/`, `log/` |
-| `~/.config/magictree/config.toml` | optional: port range, timeouts |
+| `~/.config/magictree/config.toml` | optional: port range, timeouts, build mode |
 
 Ports come from `20000-32767`, are stable across restarts, and are never visible inside
 containers. A port the primary checkout declares with `prefer` is wherever the manifest says

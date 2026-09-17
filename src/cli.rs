@@ -1,7 +1,7 @@
 use crate::banner;
 use crate::bootstrap;
 use crate::compose::{self, ComposeRunner, ContainerState};
-use crate::config::Config;
+use crate::config::{BuildMode, Config};
 use crate::ctx::{runtime_dir_for, Ctx};
 use crate::discover;
 use crate::doctor;
@@ -16,7 +16,7 @@ use crate::run;
 use crate::worktrees;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 )]
 pub struct Cli {
     /// Print what would happen and create nothing.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'n', global = true)]
     pub dry_run: bool,
     #[command(subcommand)]
     pub command: Command,
@@ -83,46 +83,46 @@ pub struct CompletionArgs {
 #[derive(Args)]
 pub struct DiscoverArgs {
     /// Write the report to this path instead of stdout.
-    #[arg(long)]
+    #[arg(long, short = 'r')]
     pub report: Option<PathBuf>,
     /// Emit JSON (the default when writing to a file).
-    #[arg(long)]
+    #[arg(long, short = 'j')]
     pub json: bool,
     /// Print the answer set implied by the report's defaults.
-    #[arg(long)]
+    #[arg(long, short = 'd')]
     pub default_answers: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct InitArgs {
     /// Answers produced from a discovery report.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, short = 'a', value_name = "FILE")]
     pub answers: Option<PathBuf>,
     /// Accept every default without prompting.
-    #[arg(long, alias = "yes")]
+    #[arg(long, short = 'y', alias = "yes")]
     pub accept_defaults: bool,
     /// Regenerate existing manifests from discovery, discarding local edits.
     /// Without it, an existing manifest only gains the services it lacks.
-    #[arg(long)]
+    #[arg(long, short = 'f')]
     pub force: bool,
     /// Ask every question again, ignoring the answers the manifest records.
-    #[arg(long)]
+    #[arg(long, short = 'r')]
     pub reanswer: bool,
     /// Print the manifests without writing them.
-    #[arg(long)]
+    #[arg(long, short = 'p')]
     pub print: bool,
     /// Also write the answers used, so the run can be replayed.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, short = 's', value_name = "FILE")]
     pub save_answers: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct DoctorArgs {
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -131,18 +131,18 @@ pub struct NewArgs {
     /// Branch to check out, creating it when it does not exist.
     pub branch: String,
     /// Base revision for a new branch (defaults to HEAD).
-    #[arg(long)]
+    #[arg(long, short = 'b')]
     pub base: Option<String>,
     /// Explicit checkout directory.
-    #[arg(long)]
+    #[arg(long, short = 'p')]
     pub path: Option<PathBuf>,
     /// Create a detached worktree at the base revision.
-    #[arg(long)]
+    #[arg(long, short = 'd')]
     pub detach: bool,
     /// Create the worktree without starting its stack.
     #[arg(long)]
     pub no_up: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -151,34 +151,34 @@ pub struct RmArgs {
     /// Worktree path, or a branch name to resolve.
     pub target: String,
     /// Discard uncommitted changes in the worktree.
-    #[arg(long)]
+    #[arg(long, short = 'f')]
     pub force: bool,
     /// Skip `down` before removing.
     #[arg(long)]
     pub no_down: bool,
     /// Also remove compose volumes.
-    #[arg(long)]
+    #[arg(long, short = 'v')]
     pub volumes: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct ListArgs {
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct GcArgs {
     /// Also run `git worktree prune` for removed checkouts.
-    #[arg(long)]
+    #[arg(long, short = 'p')]
     pub prune: bool,
     /// Sweep every repository the state dir holds a record of, including ones
     /// whose repository is itself gone.
-    #[arg(long, conflicts_with_all = ["prune", "cwd"])]
+    #[arg(long, short = 'A', conflicts_with_all = ["prune", "cwd"])]
     pub all: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -188,29 +188,40 @@ pub struct UpArgs {
     /// everything at the workspace root.
     pub services: Vec<String>,
     /// Restrict to whole apps.
-    #[arg(long = "app", value_name = "APP")]
+    #[arg(long = "app", short = 'a', value_name = "APP")]
     pub apps: Vec<String>,
     /// Start every service in the repository.
-    #[arg(long)]
+    #[arg(long, short = 'A')]
     pub all: bool,
+    /// Build the compose images before starting them, whatever `build` in
+    /// config.toml says.
+    #[arg(long, short = 'b', overrides_with = "no_build")]
+    pub build: bool,
+    /// Skip building the images of the compose services being started,
+    /// whatever `build` in config.toml says. Without either flag, `up` builds
+    /// them: that is how a changed Dockerfile or build context reaches the
+    /// stack, and Compose validates its cache, so an unchanged context costs a
+    /// cache check rather than a rebuild.
+    #[arg(long, overrides_with = "build")]
+    pub no_build: bool,
     /// Which ports to use: `declared` takes each service's `prefer`, which is
     /// what the primary checkout's own tooling and generated files expect, so
     /// it is the default there; `generated` allocates every port from this
     /// worktree's block, keeping the stack off the repository's ports. Changing
     /// the mode re-allocates the worktree's ports.
-    #[arg(long, value_name = "MODE", value_enum)]
+    #[arg(long, short = 'p', value_name = "MODE", value_enum)]
     pub ports: Option<ports::PortMode>,
     /// Directory to resolve the repository from.
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct DownArgs {
     /// Also remove named volumes (destroys per-worktree database state).
-    #[arg(long)]
+    #[arg(long, short = 'v')]
     pub volumes: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -220,16 +231,24 @@ pub struct RestartArgs {
     /// service keeps its assigned port and environment.
     #[arg(required = true, value_name = "SERVICE")]
     pub services: Vec<String>,
-    #[arg(long)]
+    /// Build the compose images before starting them, whatever `build` in
+    /// config.toml says.
+    #[arg(long, short = 'b', overrides_with = "no_build")]
+    pub build: bool,
+    /// Skip building the images of the compose services being restarted,
+    /// whatever `build` in config.toml says.
+    #[arg(long, overrides_with = "build")]
+    pub no_build: bool,
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct StatusArgs {
     /// Also run each service's health probe (may take a few seconds).
-    #[arg(long)]
+    #[arg(long, short = 'p')]
     pub probe: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -238,9 +257,9 @@ pub struct LogsArgs {
     pub service: String,
     #[arg(short, long)]
     pub follow: bool,
-    #[arg(long, default_value_t = 40)]
+    #[arg(long, short = 'l', default_value_t = 40)]
     pub lines: usize,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -248,23 +267,23 @@ pub struct LogsArgs {
 pub struct PortsArgs {
     /// Discard the current assignment and allocate fresh ports in the mode this
     /// worktree recorded.
-    #[arg(long, conflicts_with = "release")]
+    #[arg(long, short = 'r', conflicts_with = "release")]
     pub reassign: bool,
     /// Drop the assignment and allocate nothing: this worktree's ports stop
     /// being reserved, and the next `up` allocates from scratch.
-    #[arg(long)]
+    #[arg(long, short = 'R')]
     pub release: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub struct ExecArgs {
     /// Run with a specific app's environment instead of the current app's.
-    #[arg(long)]
+    #[arg(long, short = 'a')]
     pub app: Option<String>,
     /// Directory to resolve the repository from; the command runs there.
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
     /// Command and arguments, taken verbatim. A command that starts with a
     /// flag needs `--` before it.
@@ -280,15 +299,15 @@ pub struct ExecArgs {
 #[derive(Args)]
 pub struct EnvArgs {
     /// Show the merged environment of a specific app.
-    #[arg(long)]
+    #[arg(long, short = 'a')]
     pub app: Option<String>,
     /// Emit `export KEY=value` lines.
-    #[arg(long)]
+    #[arg(long, short = 'e')]
     pub export: bool,
     /// Show which layer set each value.
     #[arg(long)]
     pub explain: bool,
-    #[arg(long)]
+    #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
 
@@ -725,7 +744,8 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
     }
     let mut ctx = Ctx::load(&path)?;
     let selection = ctx.scope(&[], &[], false)?;
-    ensure(&mut ctx, &selection, None).map(|_| ())
+    let mode = ctx.config.build;
+    ensure(&mut ctx, &selection, None, mode).map(|_| ())
 }
 
 fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
@@ -867,10 +887,91 @@ fn resolve_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
 fn cmd_up(args: UpArgs, dry_run: bool) -> Result<()> {
     let mut ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     let selection = ctx.scope(&args.services, &args.apps, args.all)?;
+    let mode = build_mode(ctx.config.build, args.build, args.no_build);
     if dry_run {
-        return dryrun::up(&ctx, &selection, args.ports);
+        return dryrun::up(&ctx, &selection, args.ports, mode);
     }
-    ensure(&mut ctx, &selection, args.ports).map(|_| ())
+    ensure(&mut ctx, &selection, args.ports, mode).map(|_| ())
+}
+
+/// The build decision for this run. The CLI wins over the configured mode, so
+/// `--build` forces a build and `--no-build` skips one whatever `config.toml`
+/// says; with neither flag the configured `build` applies.
+fn build_mode(configured: BuildMode, force: bool, skip: bool) -> BuildMode {
+    if force {
+        BuildMode::Always
+    } else if skip {
+        BuildMode::Never
+    } else {
+        configured
+    }
+}
+
+/// Whether this run builds compose images, asking once when the mode says so.
+/// A selection with nothing to build — every service names an image — never
+/// asks, so `build = "ask"` stays quiet in a stack that only pulls.
+fn compose_build(
+    ctx: &Ctx,
+    selection: &[usize],
+    assignment: &ports::Assignment,
+    runners: &HashMap<(PathBuf, String), ComposeRunner>,
+    mode: BuildMode,
+) -> Result<bool> {
+    match mode {
+        BuildMode::Always => Ok(true),
+        BuildMode::Never => Ok(false),
+        BuildMode::Ask => {
+            let buildable = buildable_services(ctx, selection, assignment, runners)?;
+            if buildable.is_empty() {
+                return Ok(false);
+            }
+            Ok(bootstrap::confirm(&format!(
+                "Build images for {}",
+                buildable.join(", ")
+            )))
+        }
+    }
+}
+
+/// The selected services that build an image, named the way the user addresses
+/// them. Resolving each compose file's configuration is what separates a
+/// service that builds from one that only names an image.
+fn buildable_services(
+    ctx: &Ctx,
+    selection: &[usize],
+    assignment: &ports::Assignment,
+    runners: &HashMap<(PathBuf, String), ComposeRunner>,
+) -> Result<Vec<String>> {
+    let mut resolved: HashMap<(PathBuf, String), BTreeSet<String>> = HashMap::new();
+    let mut names: Vec<String> = Vec::new();
+    for &index in selection {
+        let node = &ctx.nodes[index];
+        if node.runtime() != Some(Runtime::Compose) {
+            continue;
+        }
+        let key = ctx
+            .runner_key(node)
+            .ok_or_else(|| anyhow!("{}: missing compose reference", node.qual()))?;
+        let container = node
+            .service()
+            .and_then(|service| service.compose.as_ref())
+            .expect("validated compose reference")
+            .service
+            .clone();
+        if !resolved.contains_key(&key) {
+            let runner = runners
+                .get(&key)
+                .ok_or_else(|| anyhow!("{}: no compose runner", node.qual()))?;
+            let env = ctx.node_env(node, assignment)?;
+            resolved.insert(key.clone(), runner.services_with_build(&env)?);
+        }
+        if resolved[&key].contains(&container) {
+            names.push(node.qual());
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 /// The idempotent core: allocate ports, materialise env, bootstrap, then start
@@ -880,6 +981,7 @@ fn ensure(
     ctx: &mut Ctx,
     selection: &[usize],
     requested: Option<ports::PortMode>,
+    mode: BuildMode,
 ) -> Result<ports::Assignment> {
     // Every service gets an assignment, not just the selected ones: a later
     // partial `up` still has to write an override for its dependencies, and a
@@ -944,6 +1046,7 @@ fn ensure(
     if !runners.is_empty() {
         compose::ensure_docker()?;
     }
+    let build = compose_build(ctx, selection, &assignment, &runners, mode)?;
 
     for &index in selection {
         let node = &ctx.nodes[index];
@@ -974,7 +1077,7 @@ fn ensure(
                         .service
                         .clone();
                     println!("{}: starting container", node.qual());
-                    match runner.up_service(&container, &env).and_then(|()| {
+                    match runner.up_service(&container, build, &env).and_then(|()| {
                         match service.wait {
                             // An initialiser is finished when its container
                             // exits; dependents must not start before that.
@@ -1190,6 +1293,7 @@ fn restart_selection(ctx: &Ctx, names: &[String]) -> Result<Vec<usize>> {
 fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
     let mut ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     let selection = restart_selection(&ctx, &args.services)?;
+    let mode = build_mode(ctx.config.build, args.build, args.no_build);
     if dry_run {
         println!("dry run: nothing is restarted");
         for &index in &selection {
@@ -1206,10 +1310,11 @@ fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
                         .service
                         .clone();
                     println!(
-                        "{}: would run docker compose -f {} -p {} stop {container}, then up -d {container}",
+                        "{}: would run docker compose -f {} -p {} stop {container}, then up -d{} {container}",
                         node.qual(),
                         key.0.display(),
-                        key.1
+                        key.1,
+                        dryrun::build_note(mode)
                     );
                 }
                 _ => {
@@ -1234,6 +1339,7 @@ fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
     if !runners.is_empty() {
         compose::ensure_docker()?;
     }
+    let build = compose_build(&ctx, &selection, &assignment, &runners, mode)?;
 
     for &index in &selection {
         let node = &ctx.nodes[index];
@@ -1262,7 +1368,7 @@ fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
                         runner.stop_service(&container, &env)?;
                     }
                     println!("{}: starting container", node.qual());
-                    runner.up_service(&container, &env)?;
+                    runner.up_service(&container, build, &env)?;
                     match service.wait {
                         Wait::Exit => wait_for_exit(
                             runner,

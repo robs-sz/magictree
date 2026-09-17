@@ -1,9 +1,20 @@
+use crate::config::BuildMode;
 use crate::ctx::Ctx;
 use crate::manifest::{Expose, NodeKind, RunStep, Runtime};
 use crate::ports;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// What the plan says about the images a compose service would start from: the
+/// `up` flag, and the note when the build is still a question.
+pub fn build_note(mode: BuildMode) -> &'static str {
+    match mode {
+        BuildMode::Never => "",
+        BuildMode::Always => " --build",
+        BuildMode::Ask => " --build, asks before building",
+    }
+}
 
 /// One expose line in the dry-run plan: container-side target plus any fixed
 /// host port the manifest demands for it.
@@ -32,7 +43,12 @@ struct PlannedHostService {
     has_health: bool,
     port_variable: Option<String>,
 }
-pub fn up(ctx: &Ctx, selection: &[usize], mode: Option<ports::PortMode>) -> Result<()> {
+pub fn up(
+    ctx: &Ctx,
+    selection: &[usize],
+    mode: Option<ports::PortMode>,
+    build: BuildMode,
+) -> Result<()> {
     println!(
         "dry run: nothing below is executed or written\n\nworktree root  {}",
         ctx.repo.worktree_root.display()
@@ -193,7 +209,10 @@ pub fn up(ctx: &Ctx, selection: &[usize], mode: Option<ports::PortMode>) -> Resu
                     }
                 }
             }
-            println!("  docker compose -f <compose file> -f <override> -p <project> up -d");
+            println!(
+                "  docker compose -f <compose file> -f <override> -p <project> up -d{}",
+                build_note(build)
+            );
         }
     }
 

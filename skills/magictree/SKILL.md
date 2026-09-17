@@ -88,11 +88,12 @@ that no manifest manages (the command still succeeds).
 ## Core loop
 
 ```bash
-magictree up            # allocate ports, bootstrap, start services, wait for health, run `after`
+magictree up            # build images, allocate ports, bootstrap, start services, wait for health
+magictree up --no-build # skip the image build for a stack already built
 magictree status        # what is running, on which port
 magictree ports         # the port assignment as URLs
 magictree logs web -f   # follow one service's output
-magictree restart web   # stop one service and start it again; deps untouched, health awaited
+magictree restart web   # stop one service and start it again (rebuilds its image); deps untouched
 magictree down          # stop everything, keep volumes
 ```
 
@@ -101,6 +102,13 @@ to the stack (`expose = "none"`), so the addresses to use are always in the
 output. It is idempotent: run it any time. It is safe to re-run after editing `magictree.toml`.
 It exits non-zero and explains itself when a service fails to become healthy: on failure
 everything stays running so it can be inspected.
+
+`up` and `restart` build the compose services they start, which is how a changed Dockerfile or
+build context is picked up; Compose validates its cache, so an unchanged context is a cache
+hit rather than a rebuild. `build` in `~/.config/magictree/config.toml` sets the default —
+`"always"` (the default), `"ask"` (one question per run, naming the services that would
+build, declined without a terminal), or `"never"` — and `--build`/`--no-build` override it for
+one run. A service that only names an `image:` is never built and never asked about.
 
 In the primary checkout `up` uses the ports the manifest declares with `prefer`, because the
 repository's own tooling and the files it generates were written against them. A linked
@@ -292,6 +300,11 @@ Common causes:
 - **A container exited.** `magictree logs` only covers host processes; the failure report
   prints the exact `docker compose -p <project> logs <service>` command to use instead. A
   one-shot initialiser that exits zero is treated as finished, not failed.
+- **A build is slow or unwanted.** `up` and `restart` build the compose services they start,
+  which is how a changed Dockerfile or build context is picked up. There is no cheaper check
+  to ask Docker for, so the build is the check: an unchanged context is a cache hit. Pass
+  `--no-build` to skip it for one run, or set `build = "never"` (or `"ask"`) in
+  `~/.config/magictree/config.toml`.
 - **Bootstrap failed.** The failing command is printed. Re-run `magictree up` after fixing
   the cause; already-satisfied steps are cached. An `after` step that fails says so and leaves
   the stack running, with its URLs already printed: fix the script and run `up` again.

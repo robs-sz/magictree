@@ -119,15 +119,20 @@ pub fn run_steps(
     Ok(messages)
 }
 
-/// The question `up` puts before a step marked `ask`. Anything but y/yes skips
-/// the step, and a run without a terminal — scripts, agents, CI — always
-/// declines, so an unattended `up` neither blocks nor runs unconfirmed work.
+/// The question `up` puts before a step marked `ask`.
 pub fn prompt(command: &str) -> bool {
+    confirm(&format!("Run task: {command}"))
+}
+
+/// Ask a yes/no question on the terminal. Anything but y/yes is a no, and a run
+/// without a terminal — scripts, agents, CI — always answers no, so an
+/// unattended `up` neither blocks nor takes unconfirmed action.
+pub fn confirm(question: &str) -> bool {
     use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
         return false;
     }
-    print!("Run task: {command} (y/N) ");
+    print!("{question} (y/N) ");
     if std::io::stdout().flush().is_err() {
         return false;
     }

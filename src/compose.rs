@@ -2,7 +2,7 @@ use crate::manifest::Expose;
 use crate::slug::short_hash;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -88,8 +88,22 @@ impl ComposeRunner {
         Ok(output)
     }
 
-    pub fn up_service(&self, service: &str, env: &BTreeMap<String, String>) -> Result<()> {
-        self.run(&["up", "-d", service], env).map(|_| ())
+    /// Start one service's containers. `build` asks Compose to build the
+    /// service's image first, which is how a changed Dockerfile or build
+    /// context reaches the container: Compose validates its cache, so an image
+    /// whose inputs are unchanged costs a cache check rather than a rebuild.
+    pub fn up_service(
+        &self,
+        service: &str,
+        build: bool,
+        env: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let args = if build {
+            vec!["up", "-d", "--build", service]
+        } else {
+            vec!["up", "-d", service]
+        };
+        self.run(&args, env).map(|_| ())
     }
 
     /// Stop one service's containers, keeping them: the next `up -d` starts
@@ -113,6 +127,30 @@ impl ComposeRunner {
         let output = self.run(&["ps", "-a", "--format", "json"], env)?;
         parse_ps(&String::from_utf8_lossy(&output.stdout))
     }
+
+    /// The services this compose file builds from a Dockerfile. A service that
+    /// only names an `image:` has nothing to build, so a build — and the
+    /// question `build = "ask"` puts before one — never concerns it.
+    pub fn services_with_build(&self, env: &BTreeMap<String, String>) -> Result<BTreeSet<String>> {
+        let output = self.run(&["config", "--format", "json"], env)?;
+        parse_built_services(&output.stdout)
+    }
+}
+
+/// The services a resolved compose configuration builds, from the JSON
+/// `docker compose config` prints.
+pub fn parse_built_services(raw: &[u8]) -> Result<BTreeSet<String>> {
+    let config: Value =
+        serde_json::from_slice(raw).context("parsing docker compose config output")?;
+    let mut names = BTreeSet::new();
+    if let Some(services) = config.get("services").and_then(Value::as_object) {
+        for (name, service) in services {
+            if service.get("build").is_some() {
+                names.insert(name.clone());
+            }
+        }
+    }
+    Ok(names)
 }
 
 pub fn parse_ps(raw: &str) -> Result<Vec<ContainerState>> {
@@ -240,5 +278,16 @@ mod tests {
     #[test]
     fn empty_output_is_not_an_error() {
         assert!(parse_ps("").expect("parse").is_empty());
+    }
+
+    #[test]
+    fn only_services_with_a_build_context_count_as_buildable() {
+        // A service that only names an `image:` has nothing to build, so it
+        // must never be named by the question `build = "ask"` puts.
+        let raw =
+            br#"{"services":{"api":{"build":{"context":"."}},"db":{"image":"example/db:18"}}}"#;
+        let built = parse_built_services(raw).expect("parse");
+        assert!(built.contains("api"));
+        assert!(!built.contains("db"));
     }
 }

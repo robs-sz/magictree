@@ -2,6 +2,28 @@ use crate::paths::Paths;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// What `up` and `restart` do with the images of the compose services they
+/// start. `Ask` puts the question before the build, and a run without a
+/// terminal declines it — scripts, agents, CI — exactly like a bootstrap step
+/// marked `ask`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildMode {
+    /// Build before starting. Compose validates its cache, so an image whose
+    /// build context is unchanged costs a cache check, not a rebuild.
+    Always,
+    /// Ask once per run, naming the services that would build.
+    Ask,
+    /// Never build; start from the images that are already there.
+    Never,
+}
+
+impl Default for BuildMode {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
 /// Optional machine-wide configuration at ~/.config/magictree/config.toml.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -16,6 +38,8 @@ pub struct Config {
     pub stop_timeout_secs: u64,
     /// Default seconds to wait for a service to become healthy.
     pub health_timeout_secs: u64,
+    /// Whether `up` and `restart` build the compose services they start.
+    pub build: BuildMode,
 }
 
 impl Default for Config {
@@ -26,6 +50,7 @@ impl Default for Config {
             port_stride: 20,
             stop_timeout_secs: 10,
             health_timeout_secs: 60,
+            build: BuildMode::default(),
         }
     }
 }
@@ -59,5 +84,28 @@ impl Config {
     pub fn slots(&self) -> u32 {
         let span = (self.port_range_end - self.port_range_start) as u32 + 1;
         span / self.port_stride as u32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_without_a_build_key_builds() {
+        // The key is optional, and an existing config written before it existed
+        // has to keep loading with the default.
+        let config: Config = toml::from_str("port_stride = 10").expect("parse");
+        assert_eq!(config.build, BuildMode::Always);
+        assert_eq!(config.port_stride, 10);
+    }
+
+    #[test]
+    fn a_build_mode_is_named_in_lowercase() {
+        let config: Config = toml::from_str(r#"build = "never""#).expect("parse");
+        assert_eq!(config.build, BuildMode::Never);
+        let config: Config = toml::from_str(r#"build = "ask""#).expect("parse");
+        assert_eq!(config.build, BuildMode::Ask);
+        assert!(toml::from_str::<Config>(r#"build = "sometimes""#).is_err());
     }
 }
