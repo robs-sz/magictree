@@ -1032,6 +1032,36 @@ fn buildable_services(
     Ok(names)
 }
 
+/// Consecutive Compose services sharing a runner and environment. Compose's
+/// `depends_on` graph owns their internal start order; magictree still checks
+/// each service's declared wait condition before proceeding to host services.
+fn compose_group_end(
+    ctx: &Ctx,
+    selection: &[usize],
+    start: usize,
+    assignment: &ports::Assignment,
+    env: &BTreeMap<String, String>,
+) -> Result<usize> {
+    let first = &ctx.nodes[selection[start]];
+    let key = ctx
+        .runner_key(first)
+        .ok_or_else(|| anyhow!("{}: missing compose reference", first.qual()))?;
+    let mut end = start + 1;
+    while end < selection.len() {
+        let index = selection[end];
+        let candidate = &ctx.nodes[index];
+        if candidate.service().is_none()
+            || candidate.runtime() != Some(Runtime::Compose)
+            || ctx.runner_key(candidate).as_ref() != Some(&key)
+            || ctx.node_env(candidate, assignment)? != *env
+        {
+            break;
+        }
+        end += 1;
+    }
+    Ok(end)
+}
+
 /// The idempotent core: allocate ports, materialise env, bootstrap, then start
 /// services in dependency order, waiting for each to become healthy, and finish
 /// with the manifest's `after` steps.
@@ -1106,9 +1136,13 @@ fn ensure(
     }
     let build = compose_build(ctx, selection, &assignment, &runners, mode)?;
 
-    for &index in selection {
+    let mut position = 0;
+    while position < selection.len() {
+        let index = selection[position];
         let node = &ctx.nodes[index];
         let env = ctx.node_env(node, &assignment)?;
+        let mut consumed = 1;
+        let mut failure_node_index = index;
         let outcome = match &node.kind {
             NodeKind::Job(job) => {
                 println!("{}: running", node.qual());
@@ -1120,7 +1154,7 @@ fn ensure(
                     Err(error) => Err((None, format!("job failed: {error}"))),
                 }
             }
-            NodeKind::Service(service) => match node.runtime() {
+            NodeKind::Service(_) => match node.runtime() {
                 Some(Runtime::Compose) => {
                     let key = ctx
                         .runner_key(node)
@@ -1128,30 +1162,80 @@ fn ensure(
                     let runner = runners
                         .get(&key)
                         .ok_or_else(|| anyhow!("{}: no compose runner", node.qual()))?;
-                    let container = service
-                        .compose
-                        .as_ref()
-                        .expect("validated compose reference")
-                        .service
-                        .clone();
-                    println!("{}: starting container", node.qual());
-                    match runner.up_service(&container, build, &env).and_then(|()| {
-                        match service.wait {
-                            // An initialiser is finished when its container
-                            // exits; dependents must not start before that.
-                            Wait::Exit => wait_for_exit(
-                                runner,
-                                &container,
-                                &env,
-                                Duration::from_secs(initializer_timeout(ctx)),
-                            ),
-                            Wait::Running => {
-                                wait_ready(ctx, node, &env, &assignment, Some((runner, &container)))
-                            }
+                    let batch_end = compose_group_end(ctx, selection, position, &assignment, &env)?;
+                    consumed = batch_end - position;
+                    let mut args = Vec::with_capacity(3 + consumed);
+                    args.extend(["up", "-d"]);
+                    if build {
+                        args.push("--build");
+                    }
+                    let services_start = args.len();
+                    for &batch_index in &selection[position..batch_end] {
+                        let batch_node = &ctx.nodes[batch_index];
+                        let container = batch_node
+                            .service()
+                            .and_then(|service| service.compose.as_ref())
+                            .expect("validated compose reference")
+                            .service
+                            .as_str();
+                        println!("{}: starting container", batch_node.qual());
+                        args.push(container);
+                    }
+                    let started = if consumed == 1 {
+                        runner.up_service(args[services_start], build, &env)
+                    } else {
+                        runner.run(&args, &env).map(|_| ())
+                    };
+                    if let Err(error) = started {
+                        if consumed > 1 {
+                            let services = args[services_start..].join(", ");
+                            bail!(
+                                "compose services [{services}] failed to start: {error}\n  compose file {}\n  project {}\n  logs     docker compose -f {} -p {} logs {}",
+                                runner.file.display(),
+                                runner.project,
+                                runner.file.display(),
+                                runner.project,
+                                args[services_start..].join(" ")
+                            );
                         }
-                    }) {
-                        Ok(()) => Ok(Some(runner)),
-                        Err(error) => Err((Some(runner), error.to_string())),
+                        Err((Some(runner), error.to_string()))
+                    } else {
+                        let ready = (|| -> Result<()> {
+                            for &batch_index in &selection[position..batch_end] {
+                                failure_node_index = batch_index;
+                                let batch_node = &ctx.nodes[batch_index];
+                                let batch_service =
+                                    batch_node.service().expect("compose service node");
+                                let container = batch_service
+                                    .compose
+                                    .as_ref()
+                                    .expect("validated compose reference")
+                                    .service
+                                    .as_str();
+                                match batch_service.wait {
+                                    // Compose owns dependency scheduling; magictree
+                                    // still verifies one-shots before host dependants.
+                                    Wait::Exit => wait_for_exit(
+                                        runner,
+                                        container,
+                                        &env,
+                                        Duration::from_secs(initializer_timeout(ctx)),
+                                    ),
+                                    Wait::Running => wait_ready(
+                                        ctx,
+                                        batch_node,
+                                        &env,
+                                        &assignment,
+                                        Some((runner, container)),
+                                    ),
+                                }?;
+                            }
+                            Ok(())
+                        })();
+                        match ready {
+                            Ok(()) => Ok(Some(runner)),
+                            Err(error) => Err((Some(runner), error.to_string())),
+                        }
                     }
                 }
                 _ => {
@@ -1188,9 +1272,11 @@ fn ensure(
         };
 
         if let Err((runner, reason)) = outcome {
-            let report = ctx.describe_failure(node, &assignment, runner, &reason);
+            let report =
+                ctx.describe_failure(&ctx.nodes[failure_node_index], &assignment, runner, &reason);
             return Err(anyhow!(report));
         }
+        position += consumed;
     }
 
     print_summary(ctx, selection, &assignment);

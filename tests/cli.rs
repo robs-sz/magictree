@@ -1,8 +1,8 @@
 //! End-to-end CLI behaviour through the real binary.
 //!
-//! These tests avoid Docker so they run anywhere: the stack is host processes
-//! only. Compose behaviour is covered by the unit-level tests and by manual
-//! verification against real repositories.
+//! These tests avoid a Docker daemon so they run anywhere. Compose startup uses
+//! a fake CLI for command and ordering assertions; daemon-backed cleanup tests
+//! live in `tests/compose.rs`.
 
 mod support;
 
@@ -162,6 +162,144 @@ fn up_is_idempotent() {
     );
 
     assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn up_starts_each_compose_project_once_and_waits_for_one_shot_before_jobs() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let fixture = Fixture::new();
+    let state = fixture.state_dir();
+    let log = state.join("docker.log");
+    let init_exited = state.join("docker.log.init-exited");
+    fixture.write(
+        "compose.yaml",
+        r#"services:
+  db:
+    image: example/db
+  cache:
+    image: example/cache
+    depends_on:
+      db:
+        condition: service_started
+  dependent:
+    image: example/dependent
+    depends_on:
+      db:
+        condition: service_started
+  init:
+    image: example/init
+  after-init:
+    image: example/after-init
+    depends_on:
+      init:
+        condition: service_completed_successfully
+"#,
+    );
+    let manifest = r#"
+version = 1
+
+[[services]]
+id = "db"
+compose = { file = "compose.yaml", service = "db" }
+
+[[services]]
+id = "cache"
+compose = { file = "compose.yaml", service = "cache" }
+
+[[services]]
+id = "dependent"
+compose = { file = "compose.yaml", service = "dependent" }
+needs = ["db"]
+
+[[services]]
+id = "init"
+compose = { file = "compose.yaml", service = "init" }
+wait = "exit"
+
+[[services]]
+id = "after-init"
+compose = { file = "compose.yaml", service = "after-init" }
+needs = ["init"]
+
+[jobs]
+verify-init = { run = "test -f '__INIT_EXITED__'", needs = ["init"] }
+"#
+    .replace("__INIT_EXITED__", &init_exited.display().to_string());
+    fixture.write("magictree.toml", &manifest);
+    fixture.git_repo();
+
+    let docker_dir = state.join("bin");
+    std::fs::create_dir_all(&docker_dir).expect("create fake docker directory");
+    let docker = docker_dir.join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$MAGICTREE_DOCKER_LOG"
+case "$*" in
+  *" ps -a --format json"*)
+    count_file="${MAGICTREE_DOCKER_LOG}.ps-count"
+    count=0
+    if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$count_file"
+    if [ "$count" -ge 4 ]; then
+      init_state=exited
+      init_exit=',"ExitCode":0'
+      : > "${MAGICTREE_DOCKER_LOG}.init-exited"
+    else
+      init_state=running
+      init_exit=''
+    fi
+    printf '[{"Service":"db","State":"running"},{"Service":"cache","State":"running"},{"Service":"dependent","State":"running"},{"Service":"init","State":"%s"%s},{"Service":"after-init","State":"running"}]\n' "$init_state" "$init_exit"
+    ;;
+esac
+"#,
+    )
+    .expect("write fake docker executable");
+    let mut permissions = std::fs::metadata(&docker)
+        .expect("fake docker metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&docker, permissions).expect("make fake docker executable");
+
+    let path = format!(
+        "{}:{}",
+        docker_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(support::bin())
+        .args(["up", "--no-build"])
+        .current_dir(fixture.path())
+        .env("MAGICTREE_STATE_DIR", &state)
+        .env("MAGICTREE_CONFIG_DIR", state.join("config"))
+        .env("MAGICTREE_NO_UPDATE_CHECK", "1")
+        .env("MAGICTREE_DOCKER_LOG", &log)
+        .env("PATH", path)
+        .output()
+        .expect("run magictree with fake docker");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = std::fs::read_to_string(log).expect("read docker call log");
+    let up_calls: Vec<_> = calls
+        .lines()
+        .filter_map(|call| call.split_once(" up -d ").map(|(_, services)| services))
+        .collect();
+    assert_eq!(
+        up_calls,
+        ["db cache dependent init after-init"],
+        "Compose starts its project once; magictree waits for init before the job"
+    );
+    assert!(
+        init_exited.exists(),
+        "the one-shot completed before its job"
+    );
 }
 
 #[test]
