@@ -1426,7 +1426,7 @@ fn restart_selection(ctx: &Ctx, names: &[String]) -> Result<Vec<usize>> {
         chosen.insert(index);
     }
     let selection: Vec<usize> = chosen.into_iter().collect();
-    manifest::order(&ctx.nodes, &ctx.edges, &selection)
+    manifest::order_selected(&ctx.nodes, &ctx.edges, &selection)
 }
 
 /// Stop the named services — the host process, or the service's containers —

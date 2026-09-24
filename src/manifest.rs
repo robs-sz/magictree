@@ -847,14 +847,37 @@ pub fn order(nodes: &[Node], edges: &[Vec<usize>], selection: &[usize]) -> Resul
         }
     }
 
+    order_scoped(nodes, edges, selection, &scope)
+}
+
+/// Topologically order exactly the selected nodes; unselected dependencies are
+/// left out, while dependencies selected explicitly still precede their users.
+pub(crate) fn order_selected(
+    nodes: &[Node],
+    edges: &[Vec<usize>],
+    selection: &[usize],
+) -> Result<Vec<usize>> {
+    let mut scope = vec![false; nodes.len()];
+    for &index in selection {
+        scope[index] = true;
+    }
+    order_scoped(nodes, edges, selection, &scope)
+}
+
+fn order_scoped(
+    nodes: &[Node],
+    edges: &[Vec<usize>],
+    selection: &[usize],
+    scope: &[bool],
+) -> Result<Vec<usize>> {
     let mut state = vec![0u8; nodes.len()];
     let mut result = Vec::new();
-    for index in selection {
+    for &index in selection {
         visit(
-            *index,
+            index,
             nodes,
             edges,
-            &scope,
+            scope,
             &mut state,
             &mut result,
             &mut Vec::new(),

@@ -1718,6 +1718,67 @@ fn pid_in_status(text: &str, service: &str) -> Option<i32> {
 }
 
 #[test]
+fn restart_does_not_restart_dependencies_of_the_selected_service() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[workspace]
+apps = ["apps/web"]
+
+[[services]]
+id = "postgres"
+command = "sleep 300"
+
+[[services]]
+id = "redis"
+command = "sleep 300"
+
+[[services]]
+id = "rustfs"
+command = "sleep 300"
+"#,
+    );
+    fixture.write(
+        "apps/web/magictree.toml",
+        r#"
+version = 1
+
+[app]
+id = "web"
+
+[[services]]
+id = "web"
+command = "sleep 300"
+needs = ["postgres", "redis", "rustfs"]
+"#,
+    );
+    fixture.git_repo();
+
+    let plan = run(
+        &["--dry-run", "restart", "web:web"],
+        &fixture.join("apps/web"),
+        &fixture.state_dir(),
+    );
+
+    assert!(plan.ok(), "{}", plan.combined());
+    assert!(
+        plan.stdout.contains("web:web: would start again"),
+        "{}",
+        plan.stdout
+    );
+    for dependency in ["postgres", "redis", "rustfs"] {
+        assert!(
+            !plan.stdout.contains(&format!("{dependency}: would")),
+            "restart must leave dependency {dependency} alone:\n{}",
+            plan.stdout
+        );
+    }
+}
+
+#[test]
 fn restart_replaces_a_running_host_service() {
     let fixture = host_stack_fixture();
     let state = fixture.state_dir();
