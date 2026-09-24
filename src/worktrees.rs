@@ -287,18 +287,47 @@ fn same_worktree(a: &Path, b: &Path) -> bool {
     key(&a) == key(&b) && a.parent().is_some()
 }
 
+/// Whether a recorded checkout is still a worktree of the repository the record
+/// names.
+///
+/// A directory at the path is not enough. A worktree removed outside magictree
+/// leaves the directory behind, and a path can be reused by something else; both
+/// pin the block forever if mere existence counts as live. git is the authority
+/// on whether a path is still a worktree of the recorded repository, so it is
+/// asked before the record is kept. A git that cannot be run is not an answer,
+/// so the record is left alone rather than reclaimed on a guess.
+fn live_checkout(path: &Path, repo_key: &str) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    match Repo::open_optional(path) {
+        // A path git resolves is live only when it is the worktree root of the
+        // repository the record was written for: an unrelated checkout at a
+        // recycled path, or a leftover directory that git resolves through its
+        // parent repository, is not the worktree this block was allocated to.
+        Ok(Some(repo)) => repo.key() == repo_key && same_worktree(&repo.worktree_root, path),
+        // No worktree resolves here — an empty husk, not a running stack.
+        Ok(None) => false,
+        // git could not be run at all: keep the record rather than guess.
+        Err(_) => true,
+    }
+}
+
 /// Release port blocks whose worktree no longer exists, stop the processes they
 /// left running, and reclaim compose resources of worktrees that are gone.
 pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<()> {
     // A checkout whose directory is gone is dead even when git still lists it,
     // because nothing can be running there. `--prune` clears the registration.
+    // A directory that is left but is no longer a worktree is dead for the same
+    // reason: nothing can run there.
+    let repo_key = repo.key();
     let live: Vec<PathBuf> = repo
         .worktrees()?
         .into_iter()
-        .filter(|entry| entry.path.exists())
         .map(|entry| entry.path)
+        .filter(|path| live_checkout(path, &repo_key))
         .collect();
-    gc_scoped(paths, &repo.key(), &live, timeout, apply)
+    gc_scoped(paths, &repo_key, &live, timeout, apply)
 }
 
 /// `gc` for every repository the state dir holds a record of.
@@ -306,20 +335,22 @@ pub fn gc(paths: &Paths, repo: &Repo, timeout: Duration, apply: bool) -> Result<
 /// A repository-scoped sweep needs the repository, so it cannot reach the case
 /// that matters most: the repository itself is gone, while its worktrees'
 /// processes, volumes and port blocks are still there. This walks the records
-/// instead. A checkout is live when its recorded path still exists, which is the
-/// same rule the repository-scoped sweep applies to git's list.
+/// instead. A checkout is live when its recorded path is still a worktree of
+/// the recorded repository, the same rule the repository-scoped sweep applies
+/// to git's list; a path that exists but no longer resolves as one is a leftover
+/// directory, not a stack to protect.
 pub fn gc_all(paths: &Paths, timeout: Duration, apply: bool) -> Result<()> {
     for repo_key in recorded_repositories(paths) {
         let live: Vec<PathBuf> = recorded_worktrees(paths, &repo_key)
             .into_iter()
-            .filter(|path| path.exists())
+            .filter(|path| live_checkout(path, &repo_key))
             .collect();
         gc_scoped(paths, &repo_key, &live, timeout, apply)?;
     }
     Ok(())
 }
 
-/// One repository's reclamation, given the checkouts that still exist.
+/// One repository's reclamation, given the checkouts that are still live.
 fn gc_scoped(
     paths: &Paths,
     repo_key: &str,

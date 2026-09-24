@@ -208,6 +208,46 @@ fn gc_all_keeps_the_block_of_a_checkout_that_still_exists() {
 }
 
 #[test]
+fn gc_releases_a_block_left_by_a_directory_that_is_no_longer_a_worktree() {
+    // A worktree removed outside magictree can leave its directory behind. git
+    // still lists it and the path still exists, but nothing can run there, so
+    // existence alone must not reserve the ports forever.
+    let (fixture, worktree, state) = repo_with_wt("husk");
+    let repo = Repo::open(fixture.path()).expect("repo");
+
+    std::fs::remove_file(worktree.join(".git")).expect("strip the worktree's git file");
+    assert!(worktree.exists(), "the directory is left behind");
+
+    worktrees::gc(&paths(&fixture), &repo, STOP_TIMEOUT, true).expect("gc");
+
+    assert_eq!(
+        block_count(&state),
+        1,
+        "the leftover directory's block is reclaimed"
+    );
+}
+
+#[test]
+fn gc_all_releases_a_block_left_by_a_directory_that_is_no_longer_a_worktree() {
+    // The same leftover, reached by the sweep that has no repository: the
+    // recorded path exists but no longer resolves as a worktree, so it is not a
+    // live stack to protect.
+    let (fixture, worktree, state) = repo_with_wt("husk");
+    let paths = paths(&fixture);
+
+    std::fs::remove_file(worktree.join(".git")).expect("strip the worktree's git file");
+    assert!(worktree.exists(), "the directory is left behind");
+
+    worktrees::gc_all(&paths, STOP_TIMEOUT, true).expect("gc --all");
+
+    assert_eq!(
+        block_count(&state),
+        1,
+        "the leftover directory's block is reclaimed"
+    );
+}
+
+#[test]
 fn gc_stops_host_processes_whose_checkout_is_gone() {
     // Nothing can read a deleted checkout's pid files, so the state dir is the
     // only surviving record that a process is still running. This is what a
