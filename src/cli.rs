@@ -1184,7 +1184,7 @@ fn ensure(
                     let started = if consumed == 1 {
                         runner.up_service(args[services_start], build, &env)
                     } else {
-                        runner.run(&args, &env).map(|_| ())
+                        runner.up_services(&args, &env).map(|_| ())
                     };
                     if let Err(error) = started {
                         if consumed > 1 {
@@ -1304,8 +1304,15 @@ fn ensure(
     Ok(assignment)
 }
 
+fn worktree_url_alias(aliases: &BTreeMap<u16, String>, port: u16) -> Option<String> {
+    aliases
+        .get(&port)
+        .map(|host| format!("http://{host}:{port}"))
+}
+
 /// Everything reachable, so it is obvious how to use the stack once it is up.
 fn print_summary(ctx: &Ctx, selection: &[usize], assignment: &ports::Assignment) {
+    let aliases = ctx.browser_url_aliases(assignment);
     let mut reachable: Vec<(String, u16)> = Vec::new();
     let mut internal: Vec<String> = Vec::new();
 
@@ -1333,7 +1340,11 @@ fn print_summary(ctx: &Ctx, selection: &[usize], assignment: &ports::Assignment)
             .max()
             .unwrap_or(4);
         for (label, port) in &reachable {
-            println!("{label:<width$}   http://localhost:{port}");
+            if let Some(alias) = worktree_url_alias(&aliases, *port) {
+                println!("{label:<width$}   http://localhost:{port}   alias {alias}");
+            } else {
+                println!("{label:<width$}   http://localhost:{port}");
+            }
         }
     }
     if !internal.is_empty() {
@@ -1577,6 +1588,10 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
             (key, ComposeRunner::new(file, None, project))
         })
         .collect();
+    let aliases = assignment
+        .as_ref()
+        .map(|assignment| ctx.browser_url_aliases(assignment))
+        .unwrap_or_default();
     let mut states: HashMap<(PathBuf, String), Vec<ContainerState>> = HashMap::new();
 
     for &index in &ctx.all_service_indices() {
@@ -1639,7 +1654,12 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
         }
 
         let url = port
-            .map(|port| format!("http://localhost:{port}"))
+            .map(|port| {
+                let alias = worktree_url_alias(&aliases, port)
+                    .map(|alias| format!(" (alias {alias})"))
+                    .unwrap_or_default();
+                format!("http://localhost:{port}{alias}")
+            })
             .unwrap_or_default();
         println!(
             "{:<24} {:<8} {:<28} {}",
@@ -1856,8 +1876,12 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
             (ports::PortMode::Declared, false) => "declared ports".to_string(),
         }
     );
+    let aliases = ctx.browser_url_aliases(&assignment);
     for (name, port) in &assignment.ports {
-        println!("{name:<24} {port:<6} http://localhost:{port}");
+        let alias = worktree_url_alias(&aliases, *port)
+            .map(|alias| format!("   alias {alias}"))
+            .unwrap_or_default();
+        println!("{name:<24} {port:<6} http://localhost:{port}{alias}");
     }
     Ok(())
 }

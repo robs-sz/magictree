@@ -333,6 +333,10 @@ pub struct PortSpec {
     /// Require this port; fail loudly when it is unavailable.
     #[serde(default)]
     pub require: Option<u16>,
+    /// Rewrite URLs that target this assigned port from `localhost` to the
+    /// current worktree's `<slug>.localhost` host.
+    #[serde(default)]
+    pub browser_alias: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

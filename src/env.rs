@@ -90,6 +90,76 @@ pub fn build(
     Ok(plan)
 }
 
+/// Rewrite HTTP URLs that use an opted-in assigned localhost port.
+///
+/// Only the URL authority is changed; unrelated localhost URLs and non-HTTP
+/// values remain untouched.
+pub fn rewrite_localhost_urls(value: &str, aliases: &BTreeMap<u16, String>) -> Option<String> {
+    const PREFIXES: [(&str, &str); 4] = [
+        ("http://localhost:", "http://"),
+        ("https://localhost:", "https://"),
+        ("ws://localhost:", "ws://"),
+        ("wss://localhost:", "wss://"),
+    ];
+
+    if aliases.is_empty() || !value.contains("localhost:") {
+        return None;
+    }
+
+    let mut output = None;
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((start, marker, scheme)) = PREFIXES
+            .iter()
+            .filter_map(|(marker, scheme)| {
+                value[cursor..]
+                    .find(marker)
+                    .map(|offset| (cursor + offset, *marker, *scheme))
+            })
+            .min_by_key(|(start, _, _)| *start)
+        else {
+            break;
+        };
+        let port_start = start + marker.len();
+        let port_end = value.as_bytes()[port_start..]
+            .iter()
+            .position(|byte| !byte.is_ascii_digit())
+            .map(|offset| port_start + offset)
+            .unwrap_or(value.len());
+        if port_start == port_end {
+            cursor = port_end;
+            continue;
+        }
+        let boundary = value.as_bytes().get(port_end).map_or(true, |byte| {
+            !byte.is_ascii_alphanumeric() && !b"-._:".contains(byte)
+        });
+        if !boundary {
+            cursor = port_end;
+            continue;
+        }
+        let Ok(port) = value[port_start..port_end].parse::<u16>() else {
+            cursor = port_end;
+            continue;
+        };
+        let Some(host) = aliases.get(&port) else {
+            cursor = port_end;
+            continue;
+        };
+
+        let output = output.get_or_insert_with(|| String::with_capacity(value.len()));
+        output.push_str(&value[cursor..start]);
+        output.push_str(scheme);
+        output.push_str(host);
+        output.push(':');
+        output.push_str(&value[port_start..port_end]);
+        cursor = port_end;
+    }
+
+    let mut output = output?;
+    output.push_str(&value[cursor..]);
+    Some(output)
+}
+
 fn interpolate(value: &str, resolved: &BTreeMap<String, String>) -> Result<String> {
     let mut out = String::new();
     let mut rest = value;

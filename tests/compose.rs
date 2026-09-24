@@ -270,3 +270,82 @@ fn down_volumes_removes_the_worktrees_volume() {
     assert!(removed.ok(), "{}", removed.combined());
     assert!(project.volumes().is_empty(), "the volume is gone");
 }
+
+#[test]
+fn compose_environment_rewrites_only_opted_in_service_urls() {
+    if !docker_ready() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.write(
+        "compose.yaml",
+        r#"
+services:
+  web:
+    image: alpine:3
+    command: ["sh", "-c", "sleep 300"]
+    environment:
+      WEB_CALLBACK: "http://localhost:${MAGICTREE_PORT_web}/auth/callback"
+      API_URL: "http://localhost:${MAGICTREE_PORT_api}/api"
+  api:
+    image: alpine:3
+    command: ["sh", "-c", "sleep 300"]
+"#,
+    );
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[[services]]
+id = "web"
+compose = { file = "compose.yaml", service = "web" }
+port = { target = 8080, env = "WEB_PORT", browser_alias = true }
+
+[[services]]
+id = "api"
+compose = { file = "compose.yaml", service = "api" }
+port = { target = 8081, env = "API_PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let added = fixture.git(&["worktree", "add", "-q", "mtcg-alias", "-b", "mtcg-alias"]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join("mtcg-alias");
+    let state = fixture.state_dir();
+    let project = Project("mtcg-alias".to_string());
+
+    let up = support::run(&["up", "--no-build", "web"], &worktree, &state);
+    assert!(up.ok(), "{}", up.combined());
+    let ports = support::run(&["ports"], &worktree, &state);
+    assert!(ports.ok(), "{}", ports.combined());
+    let port_of = |name: &str| -> u16 {
+        ports
+            .stdout
+            .lines()
+            .find(|line| line.starts_with(name))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|port| port.parse().ok())
+            .unwrap_or_else(|| panic!("no port for {name}:\n{}", ports.stdout))
+    };
+    let web_port = port_of("web");
+    let api_port = port_of("api");
+    let container = project
+        .containers()
+        .into_iter()
+        .next()
+        .expect("web container is running");
+    assert_eq!(
+        docker_lines(&["exec", &container, "printenv", "WEB_CALLBACK"]),
+        [format!(
+            "http://mtcg-alias.localhost:{web_port}/auth/callback"
+        )]
+    );
+    assert_eq!(
+        docker_lines(&["exec", &container, "printenv", "API_URL"]),
+        [format!("http://localhost:{api_port}/api")]
+    );
+
+    let down = support::run(&["down"], &worktree, &state);
+    assert!(down.ok(), "{}", down.combined());
+}

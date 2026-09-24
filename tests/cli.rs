@@ -113,6 +113,21 @@ fn up_status_ports_down_round_trip() {
     assert!(ports.ok(), "{}", ports.combined());
     assert!(ports.stdout.contains("block"), "{}", ports.stdout);
 
+    let port = assigned_port(&ports.stdout, "idle");
+    let local_url = format!("http://localhost:{port}");
+    assert!(up.stdout.contains(&local_url), "{}", up.stdout);
+    assert!(
+        status_cmd.stdout.contains(&local_url),
+        "{}",
+        status_cmd.stdout
+    );
+    assert!(ports.stdout.contains(&local_url), "{}", ports.stdout);
+    assert!(
+        !ports.stdout.contains(".localhost:"),
+        "aliases are opt-in: {}",
+        ports.stdout
+    );
+
     let down = run(&["down"], fixture.path(), &state);
     assert!(down.ok(), "{}", down.combined());
 
@@ -645,6 +660,126 @@ ports = [
     assert!(up.stdout.contains("logs"), "{}", up.stdout);
 
     assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn opted_in_ports_rewrite_only_their_local_urls() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[env]
+WEB_CALLBACK = "http://localhost:${MAGICTREE_PORT_web_http}/auth/callback"
+WEB_SOCKET = "ws://localhost:${MAGICTREE_PORT_web_http}/socket"
+WEB_METRICS_URL = "http://localhost:${MAGICTREE_PORT_web_metrics}/metrics"
+API_URL = "http://localhost:${MAGICTREE_PORT_api}/api"
+
+[[services]]
+id = "web"
+command = "sleep 300"
+ports = [
+  { name = "http", env = "WEB_PORT", browser_alias = true },
+  { name = "metrics", env = "METRICS_PORT" },
+]
+
+[[services]]
+id = "api"
+command = "sleep 300"
+port = { env = "API_PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let added = fixture.git(&["worktree", "add", "-q", "feature-web", "-b", "feature-web"]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join("feature-web");
+    let state = fixture.state_dir();
+
+    let env = run(&["env"], &worktree, &state);
+    assert!(env.ok(), "{}", env.combined());
+    let ports = run(&["ports"], &worktree, &state);
+    assert!(ports.ok(), "{}", ports.combined());
+    let web_port = assigned_port(&ports.stdout, "web:http");
+    let metrics_port = assigned_port(&ports.stdout, "web:metrics");
+    let api_port = assigned_port(&ports.stdout, "api");
+    assert!(
+        env.stdout.contains(&format!(
+            "WEB_CALLBACK=http://feature-web.localhost:{web_port}/auth/callback"
+        )),
+        "only the opted-in web URL uses the alias:\n{}",
+        env.stdout
+    );
+    assert!(
+        env.stdout.contains(&format!(
+            "WEB_SOCKET=ws://feature-web.localhost:{web_port}/socket"
+        )),
+        "WebSocket URLs use the same selected alias:\n{}",
+        env.stdout
+    );
+    assert!(
+        env.stdout.contains(&format!(
+            "WEB_METRICS_URL=http://localhost:{metrics_port}/metrics"
+        )),
+        "the unmarked port of the same service stays on localhost:\n{}",
+        env.stdout
+    );
+    assert!(
+        env.stdout
+            .contains(&format!("API_URL=http://localhost:{api_port}/api")),
+        "an unmarked service URL stays on localhost:\n{}",
+        env.stdout
+    );
+    assert!(
+        ports
+            .stdout
+            .contains(&format!("http://feature-web.localhost:{web_port}")),
+        "ports shows the opted-in alias:\n{}",
+        ports.stdout
+    );
+    let api_line = ports
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("api"))
+        .expect("unaliased API port line");
+    assert!(!api_line.contains(".localhost:"), "{api_line}");
+    let metrics_line = ports
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("web:metrics"))
+        .expect("unaliased metrics port line");
+    assert!(!metrics_line.contains(".localhost:"), "{metrics_line}");
+
+    let up = run(&["up"], &worktree, &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        up.stdout
+            .contains(&format!("http://feature-web.localhost:{web_port}")),
+        "up shows the opted-in alias:\n{}",
+        up.stdout
+    );
+    let status = run(&["status"], &worktree, &state);
+    assert!(status.ok(), "{}", status.combined());
+    assert!(
+        status
+            .stdout
+            .contains(&format!("http://feature-web.localhost:{web_port}")),
+        "status shows the opted-in alias:\n{}",
+        status.stdout
+    );
+    let api_line = up
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("api"))
+        .expect("unaliased API URL line");
+    assert!(!api_line.contains(".localhost:"), "{api_line}");
+    let metrics_line = up
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("web:metrics"))
+        .expect("unaliased metrics URL line");
+    assert!(!metrics_line.contains(".localhost:"), "{metrics_line}");
+    assert!(run(&["down"], &worktree, &state).ok());
 }
 
 #[test]

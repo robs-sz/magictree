@@ -72,6 +72,15 @@ Nothing is configured per worktree: each gets its own port block, its own `MAGIC
 binds a different port in every checkout. Untracked build output is not inherited either;
 `[bootstrap] sync` links it from the primary checkout.
 
+Ports use `localhost` by default. Add `browser_alias = true` to a port declaration to print
+and use a second URL at `http://<MAGICTREE_SLUG>.localhost:<port>`. Magictree rewrites HTTP(S)
+and WebSocket URLs that target that opted-in port in manifest environment values and resolved
+Compose service environments; URLs for unmarked ports stay unchanged. The alias reaches the same
+loopback listener, so no proxy or hosts-file entry is needed. Applications must accept the
+alternate `Host`, and auth providers must allow rewritten callback URLs. Bare hostname settings
+without a port (for example, an external-domain setting) are not rewritten.
+
+
 ```sh
 magictree list               # linked worktrees with their ports; not the primary checkout
 magictree ports              # this worktree's assignment
@@ -307,6 +316,7 @@ where each needs its own `name`.
 | `env` | Variable receiving the allocated port: for a host process the one it reads, for a compose service the one its compose file interpolates. Published for the whole stack, so any process may read it. Reserved magictree names are rejected. |
 | `prefer` | The port this service runs on in the primary checkout. Taken as declared there; a linked worktree ignores it and allocates from its own block. |
 | `require` | Fail loudly when this port is unavailable, in any worktree. |
+| `browser_alias` | Rewrite URLs that target this assigned port to the worktree's `<slug>.localhost` host; show the alias in `up`, `status`, and `ports`. Disabled by default. |
 
 A declared port is the checkout's own: the repository's tooling, the `.env` files it generates
 and anything registered against a callback URL were written against that number, so the primary

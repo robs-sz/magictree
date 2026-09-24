@@ -269,6 +269,36 @@ impl Ctx {
         out
     }
 
+    pub fn browser_url_aliases(&self, assignment: &Assignment) -> BTreeMap<u16, String> {
+        let mut aliases = BTreeMap::new();
+        let mut host = None;
+        for node in &self.nodes {
+            let Some(service) = node.service() else {
+                continue;
+            };
+            if service.expose != Expose::Port {
+                continue;
+            }
+            let declared = service.ports();
+            let multiple = declared.len() > 1;
+            for port in declared {
+                if !port.browser_alias {
+                    continue;
+                }
+                let name = if multiple {
+                    port.name.as_deref().filter(|name| *name != node.id)
+                } else {
+                    None
+                };
+                if let Some(value) = assignment.ports.get(&self.port_key(node, name)) {
+                    let alias_host = host.get_or_insert_with(|| format!("{}.localhost", self.slug));
+                    aliases.insert(*value, alias_host.clone());
+                }
+            }
+        }
+        aliases
+    }
+
     /// Registry key for one of a service's ports. The service id alone is used
     /// when the service has a single port, so existing manifests keep their key.
     pub fn port_key(&self, node: &Node, port_name: Option<&str>) -> String {
@@ -412,7 +442,14 @@ impl Ctx {
                 }
             }
         }
-        env::build(computed, workspace_env, app_env)
+        let mut plan = env::build(computed, workspace_env, app_env)?;
+        let aliases = self.browser_url_aliases(assignment);
+        for value in plan.vars.values_mut() {
+            if let Some(rewritten) = env::rewrite_localhost_urls(value, &aliases) {
+                *value = rewritten;
+            }
+        }
+        Ok(plan)
     }
 
     /// The service that publishes `variable` in `port.env`, when one does.
@@ -501,14 +538,13 @@ impl Ctx {
         for group in &groups {
             let override_file = compose::write_override(&self.runtime_dir, group)?;
             let key = (group.file.clone(), group.project.clone());
-            runners.insert(
-                key,
-                ComposeRunner::new(
-                    group.file.clone(),
-                    Some(override_file),
-                    group.project.clone(),
-                ),
-            );
+            let runner = ComposeRunner::new(
+                group.file.clone(),
+                Some(override_file),
+                group.project.clone(),
+            )
+            .with_browser_aliases(self.browser_url_aliases(assignment));
+            runners.insert(key, runner);
         }
         Ok(runners)
     }
