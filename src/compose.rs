@@ -51,6 +51,14 @@ pub struct ComposeRunner {
     pub project: String,
     /// Selected localhost URLs to rewrite when Compose launches services.
     pub browser_aliases: BTreeMap<u16, String>,
+    /// Compose services whose environment may carry an alias, by Compose
+    /// service name: the ones that publish a port. The alias host resolves for
+    /// a browser and for the host's own resolver, but not for every process a
+    /// container runs, so only the environment a browser reaches is rewritten.
+    /// An internal service's environment is read by other processes — a worker,
+    /// a provisioning container that writes files — and must stay on
+    /// `localhost`.
+    pub browser_alias_services: BTreeSet<String>,
 }
 
 impl ComposeRunner {
@@ -60,11 +68,17 @@ impl ComposeRunner {
             override_file,
             project,
             browser_aliases: BTreeMap::new(),
+            browser_alias_services: BTreeSet::new(),
         }
     }
 
-    pub fn with_browser_aliases(mut self, aliases: BTreeMap<u16, String>) -> Self {
+    pub fn with_browser_aliases(
+        mut self,
+        aliases: BTreeMap<u16, String>,
+        services: BTreeSet<String>,
+    ) -> Self {
         self.browser_aliases = aliases;
+        self.browser_alias_services = services;
         self
     }
 
@@ -129,6 +143,9 @@ impl ComposeRunner {
         let mut replacements: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         if let Some(services) = config.get("services").and_then(Value::as_object) {
             for (service_name, service) in services {
+                if !self.browser_alias_services.contains(service_name) {
+                    continue;
+                }
                 let Some(environment) = service.get("environment").and_then(Value::as_object)
                 else {
                     continue;

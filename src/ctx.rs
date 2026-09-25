@@ -543,7 +543,10 @@ impl Ctx {
                 Some(override_file),
                 group.project.clone(),
             )
-            .with_browser_aliases(self.browser_url_aliases(assignment));
+            .with_browser_aliases(
+                self.browser_url_aliases(assignment),
+                browser_services(group),
+            );
             runners.insert(key, runner);
         }
         Ok(runners)
@@ -828,4 +831,19 @@ impl Ctx {
         }
         assignment
     }
+}
+
+/// The compose services of one group a browser can reach, by compose service
+/// name. Only a service that publishes a port is browser-facing, so only its
+/// environment may carry the worktree alias: an internal service's environment
+/// is read by other processes — a worker, a provisioning container that writes
+/// them into files — and the alias host is a browser hostname, not one every
+/// resolver answers.
+fn browser_services(group: &ComposeGroup) -> BTreeSet<String> {
+    group
+        .services
+        .iter()
+        .filter(|service| service.expose == Expose::Port)
+        .map(|service| service.name.clone())
+        .collect()
 }

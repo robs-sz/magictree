@@ -46,6 +46,22 @@ impl Project {
         docker_lines(&["ps", "-a", "-q", "--filter", &self.project_filter()])
     }
 
+    /// The container id of one service of this project.
+    fn container_of(&self, service: &str) -> String {
+        docker_lines(&[
+            "ps",
+            "-a",
+            "-q",
+            "--filter",
+            &self.project_filter(),
+            "--filter",
+            &format!("label=com.docker.compose.service={service}"),
+        ])
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no container for {service}"))
+    }
+
     fn volumes(&self) -> Vec<String> {
         docker_lines(&["volume", "ls", "-q", "--filter", &self.project_filter()])
     }
@@ -290,6 +306,11 @@ services:
   api:
     image: alpine:3
     command: ["sh", "-c", "sleep 300"]
+  stock:
+    image: alpine:3
+    command: ["sh", "-c", "sleep 300"]
+    environment:
+      STOCK_CALLBACK: "http://localhost:${MAGICTREE_PORT_web}/auth/callback"
 "#,
     );
     fixture.write(
@@ -306,6 +327,11 @@ port = { target = 8080, env = "WEB_PORT", browser_alias = true }
 id = "api"
 compose = { file = "compose.yaml", service = "api" }
 port = { target = 8081, env = "API_PORT" }
+
+[[services]]
+id = "stock"
+compose = { file = "compose.yaml", service = "stock" }
+expose = "none"
 "#,
     );
     fixture.git_repo();
@@ -315,7 +341,7 @@ port = { target = 8081, env = "API_PORT" }
     let state = fixture.state_dir();
     let project = Project("mtcg-alias".to_string());
 
-    let up = support::run(&["up", "--no-build", "web"], &worktree, &state);
+    let up = support::run(&["up", "--no-build", "web", "stock"], &worktree, &state);
     assert!(up.ok(), "{}", up.combined());
     let ports = support::run(&["ports"], &worktree, &state);
     assert!(ports.ok(), "{}", ports.combined());
@@ -330,11 +356,7 @@ port = { target = 8081, env = "API_PORT" }
     };
     let web_port = port_of("web");
     let api_port = port_of("api");
-    let container = project
-        .containers()
-        .into_iter()
-        .next()
-        .expect("web container is running");
+    let container = project.container_of("web");
     assert_eq!(
         docker_lines(&["exec", &container, "printenv", "WEB_CALLBACK"]),
         [format!(
@@ -344,6 +366,14 @@ port = { target = 8081, env = "API_PORT" }
     assert_eq!(
         docker_lines(&["exec", &container, "printenv", "API_URL"]),
         [format!("http://localhost:{api_port}/api")]
+    );
+    // A service that publishes no port cannot be reached by a browser, so its
+    // environment belongs to the processes that read it — and those resolve
+    // `localhost`, not the browser-only alias.
+    let internal = project.container_of("stock");
+    assert_eq!(
+        docker_lines(&["exec", &internal, "printenv", "STOCK_CALLBACK"]),
+        [format!("http://localhost:{web_port}/auth/callback")]
     );
 
     let down = support::run(&["down"], &worktree, &state);

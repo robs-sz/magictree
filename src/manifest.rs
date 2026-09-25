@@ -334,7 +334,9 @@ pub struct PortSpec {
     #[serde(default)]
     pub require: Option<u16>,
     /// Rewrite URLs that target this assigned port from `localhost` to the
-    /// current worktree's `<slug>.localhost` host.
+    /// current worktree's `<slug>.localhost` host. Compose service environments
+    /// are rewritten only for services that publish a port, since only those
+    /// are reachable from a browser.
     #[serde(default)]
     pub browser_alias: bool,
 }
