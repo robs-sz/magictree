@@ -287,6 +287,17 @@ fn same_worktree(a: &Path, b: &Path) -> bool {
     key(&a) == key(&b) && a.parent().is_some()
 }
 
+/// What a recorded checkout resolves to.
+enum Checkout {
+    /// Still a worktree of the recorded repository.
+    Live(Repo),
+    /// Gone, or no longer a worktree of that repository.
+    Gone,
+    /// git could not be run at all: not an answer, so records are left alone
+    /// rather than reclaimed or reported as gone on a guess.
+    Unknown,
+}
+
 /// Whether a recorded checkout is still a worktree of the repository the record
 /// names.
 ///
@@ -294,22 +305,30 @@ fn same_worktree(a: &Path, b: &Path) -> bool {
 /// leaves the directory behind, and a path can be reused by something else; both
 /// pin the block forever if mere existence counts as live. git is the authority
 /// on whether a path is still a worktree of the recorded repository, so it is
-/// asked before the record is kept. A git that cannot be run is not an answer,
-/// so the record is left alone rather than reclaimed on a guess.
+/// asked before the record is kept.
 fn live_checkout(path: &Path, repo_key: &str) -> bool {
+    matches!(checkout_state(path, repo_key), Checkout::Live(_))
+}
+
+fn checkout_state(path: &Path, repo_key: &str) -> Checkout {
     if !path.exists() {
-        return false;
+        return Checkout::Gone;
     }
     match Repo::open_optional(path) {
         // A path git resolves is live only when it is the worktree root of the
         // repository the record was written for: an unrelated checkout at a
         // recycled path, or a leftover directory that git resolves through its
         // parent repository, is not the worktree this block was allocated to.
-        Ok(Some(repo)) => repo.key() == repo_key && same_worktree(&repo.worktree_root, path),
+        Ok(Some(repo)) => {
+            if repo.key() == repo_key && same_worktree(&repo.worktree_root, path) {
+                Checkout::Live(repo)
+            } else {
+                Checkout::Gone
+            }
+        }
         // No worktree resolves here — an empty husk, not a running stack.
-        Ok(None) => false,
-        // git could not be run at all: keep the record rather than guess.
-        Err(_) => true,
+        Ok(None) => Checkout::Gone,
+        Err(_) => Checkout::Unknown,
     }
 }
 
@@ -350,6 +369,45 @@ pub fn gc_all(paths: &Paths, timeout: Duration, apply: bool) -> Result<()> {
     Ok(())
 }
 
+/// Drop everything magictree recorded for a worktree whose checkout has just
+/// been removed: the processes it left running, its state directory, and its
+/// port block.
+///
+/// `gc` reclaims the same things from the other side, for records whose
+/// checkout disappeared without a command. `rm` calls this itself so a removal
+/// leaves nothing behind for a later sweep to find: without it the block stays
+/// reserved machine-wide and the state directory keeps the environment and pid
+/// files of a checkout that is gone.
+pub fn forget(paths: &Paths, repo_key: &str, worktree_id: &str, timeout: Duration) -> Result<()> {
+    let dir = paths.worktree_dir(repo_key, worktree_id);
+    if dir.is_dir() {
+        for (name, pid) in run::recorded(&dir) {
+            if run::is_alive(pid) {
+                println!("stopping {name} (pid {pid}) of worktree {worktree_id}");
+            }
+        }
+        run::stop_all(&dir, timeout)?;
+        std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        // An empty repository directory would otherwise be read as a repository
+        // by the next `gc --all`.
+        let _ = std::fs::remove_dir(paths.worktrees_dir().join(repo_key));
+    }
+    // Past this point the record reserves nothing: the ports are read before
+    // the release, because releasing is what deletes the assignment.
+    let Some(assignment) = ports::load(paths, repo_key, worktree_id)? else {
+        return Ok(());
+    };
+    ports::release(paths, repo_key, worktree_id)?;
+    let stride = Config::load(paths)?.port_stride;
+    println!(
+        "released block {}-{} (worktree {})",
+        assignment.block_start,
+        assignment.block_start.saturating_add(stride - 1),
+        assignment.worktree_id
+    );
+    Ok(())
+}
+
 /// One repository's reclamation, given the checkouts that are still live.
 fn gc_scoped(
     paths: &Paths,
@@ -385,8 +443,8 @@ fn gc_scoped(
                 println!(
                     "{} block {}-{} (worktree {})",
                     if apply { "released" } else { "would release" },
-                    assignment.base,
-                    assignment.base.saturating_add(stride - 1),
+                    assignment.block_start,
+                    assignment.block_start.saturating_add(stride - 1),
                     assignment.worktree_id
                 );
                 if apply {
@@ -536,8 +594,15 @@ fn sweep_worktree_state(
 
 /// The checkout a state directory describes, from its own `ports.json`.
 fn state_owner(dir: &Path) -> Option<String> {
+    read_state_assignment(dir)?.worktree_path
+}
+
+/// A state directory's `ports.json` mirror. Unlike a block, this file reserves
+/// nothing, so an unreadable one is skipped in silence: `gc` and `list --all`
+/// both treat it as state they cannot attribute rather than as an error.
+fn read_state_assignment(dir: &Path) -> Option<Assignment> {
     let raw = std::fs::read_to_string(dir.join("ports.json")).ok()?;
-    serde_json::from_str::<Assignment>(&raw).ok()?.worktree_path
+    serde_json::from_str(&raw).ok()
 }
 
 /// The compose project a worktree last ran, from the environment `up` wrote.
@@ -711,8 +776,192 @@ pub fn worktree_rows(repo: &Repo, paths: &Paths) -> Result<Vec<(String, PathBuf,
     Ok(rows)
 }
 
+/// One worktree the state dir holds a record of, for `list --all`.
+pub struct RecordedWorktree {
+    /// Repository the record belongs to, as its state dir is keyed.
+    pub repo_key: String,
+    /// The repository's primary checkout, when a record names one. The key is
+    /// a hash, so this is what tells two repositories apart.
+    pub repo_path: Option<PathBuf>,
+    /// Identity git assigned the worktree; `main` is the primary checkout.
+    pub worktree_id: String,
+    /// The recorded checkout path.
+    pub path: Option<PathBuf>,
+    /// Ports the record still reserves. Empty once `ports --release` dropped
+    /// the block, whatever the state directory's stale mirror still says.
+    pub ports: String,
+    /// Whether the recorded path is still a worktree of the recorded
+    /// repository. `None` when no record ever named a path, which is also what
+    /// `gc` leaves alone.
+    pub live: Option<bool>,
+}
+
+/// Rows for `list --all`: every worktree the state dir holds a record of, in
+/// every repository, whether or not its checkout still exists.
+///
+/// A worktree is recorded on two shapes: the port block that reserves its
+/// ports, and its state directory. Neither implies the other — `ports
+/// --release` drops the block and keeps the state, and a checkout removed
+/// outside magictree keeps both until `gc` — so the union is what magictree
+/// watched, rather than what is running.
+pub fn all_worktree_rows(paths: &Paths) -> Vec<RecordedWorktree> {
+    let mut records: BTreeMap<(String, String), RecordedWorktree> = BTreeMap::new();
+
+    if let Ok(entries) = std::fs::read_dir(paths.blocks_dir()) {
+        for entry in entries.flatten() {
+            let Some(assignment) = read_assignment(&entry.path()) else {
+                continue;
+            };
+            let key = (assignment.repo_key.clone(), assignment.worktree_id.clone());
+            let record = records.entry(key).or_insert_with(|| RecordedWorktree {
+                repo_key: assignment.repo_key.clone(),
+                repo_path: None,
+                worktree_id: assignment.worktree_id.clone(),
+                path: None,
+                ports: String::new(),
+                live: None,
+            });
+            if record.path.is_none() {
+                record.path = assignment.worktree_path.clone().map(PathBuf::from);
+            }
+            record.ports = describe_ports(&assignment);
+        }
+    }
+
+    // A state directory is the only record left once its block is released, and
+    // the only one that names a checkout whose block was written before paths
+    // were recorded.
+    if let Ok(repositories) = std::fs::read_dir(paths.worktrees_dir()) {
+        for repository in repositories.flatten() {
+            let Ok(worktrees) = std::fs::read_dir(repository.path()) else {
+                continue;
+            };
+            for worktree in worktrees.flatten() {
+                let dir = worktree.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                // Unreadable state cannot be attributed to a checkout, so it is
+                // skipped here for the same reason `gc` refuses to guess.
+                let Some(assignment) = read_state_assignment(&dir) else {
+                    continue;
+                };
+                let Some(owner) = assignment.worktree_path.clone() else {
+                    continue;
+                };
+                let key = (assignment.repo_key.clone(), assignment.worktree_id.clone());
+                let record = records.entry(key).or_insert_with(|| RecordedWorktree {
+                    repo_key: assignment.repo_key.clone(),
+                    repo_path: None,
+                    worktree_id: assignment.worktree_id.clone(),
+                    path: None,
+                    ports: String::new(),
+                    live: None,
+                });
+                if record.path.is_none() {
+                    record.path = Some(PathBuf::from(owner));
+                }
+            }
+        }
+    }
+
+    let mut rows: Vec<RecordedWorktree> = records.into_values().collect();
+    let mut roots: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for row in rows.iter_mut() {
+        let Some(path) = row.path.as_deref() else {
+            continue;
+        };
+        match checkout_state(path, &row.repo_key) {
+            Checkout::Live(repo) => {
+                row.live = Some(true);
+                // The primary checkout names the repository, but only a
+                // checkout that was itself used has a record: a linked worktree
+                // that was upped first still names the repository through git.
+                if !roots.contains_key(&row.repo_key) {
+                    roots.insert(row.repo_key.clone(), repo.main_worktree_root());
+                }
+            }
+            Checkout::Gone => row.live = Some(false),
+            Checkout::Unknown => row.live = None,
+        }
+    }
+    // A record of the primary checkout is authoritative over one derived from a
+    // linked worktree.
+    for row in &rows {
+        if row.worktree_id == crate::repo::PRIMARY_WORKTREE_ID {
+            if let Some(path) = &row.path {
+                roots.insert(row.repo_key.clone(), path.clone());
+            }
+        }
+    }
+    for row in &mut rows {
+        row.repo_path = roots.get(&row.repo_key).cloned();
+    }
+    rows
+}
+
+/// The worktree of `repo` a `rm` target names: a path on disk, a branch, a
+/// directory name, or the identity `list` prints.
+///
+/// `None` means this repository has no such worktree; a git that cannot answer
+/// at all is an error, so `rm` never mistakes a broken git for a missing
+/// worktree and looks somewhere else.
+pub fn find_worktree(repo: &Repo, target: &str) -> Result<Option<PathBuf>> {
+    let direct = PathBuf::from(target);
+    if direct.is_dir() {
+        return Ok(Some(direct.canonicalize().unwrap_or(direct)));
+    }
+    for entry in repo.worktrees()? {
+        let id = admin_id(&repo.common_dir, &canonical_or_self(&entry.path));
+        let matches = entry.branch.as_deref() == Some(target)
+            || entry
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy() == target)
+                .unwrap_or(false)
+            || id.as_deref() == Some(target);
+        if matches {
+            return Ok(Some(entry.path));
+        }
+    }
+    Ok(None)
+}
+
+/// The records a `rm` target names, wherever they live: the identity `list`
+/// prints, a directory name, or the path of the checkout.
+pub fn recorded_matches(paths: &Paths, target: &str) -> Vec<RecordedWorktree> {
+    let named = Path::new(target);
+    all_worktree_rows(paths)
+        .into_iter()
+        .filter(|row| {
+            if row.worktree_id == target {
+                return true;
+            }
+            match row.path.as_deref() {
+                // The same checkout spelled with and without a symlink (`/var`
+                // and `/private/var` on macOS) is still the same checkout.
+                Some(path) => {
+                    same_worktree(path, named)
+                        || path
+                            .file_name()
+                            .map(|name| name.to_string_lossy() == target)
+                            .unwrap_or(false)
+                }
+                None => false,
+            }
+        })
+        .collect()
+}
+
 /// Find the identity of the worktree at `worktree`, from the administrative
 /// directory git assigned it.
+///
+/// The `gitdir` file may hold either form: an absolute path, or a relative one,
+/// which git writes with `worktree.useRelativePaths` and resolves against the
+/// administrative directory that holds the file — not against the directory the
+/// reader happens to be running in. Read the second way, the pointer resolves
+/// somewhere that is not the worktree, no administrative directory is attributed
+/// to it, and `list` drops every linked worktree instead of naming it.
 fn admin_id(common_dir: &Path, worktree: &Path) -> Option<String> {
     let dir = common_dir.join("worktrees");
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -720,9 +969,13 @@ fn admin_id(common_dir: &Path, worktree: &Path) -> Option<String> {
         let Ok(raw) = std::fs::read_to_string(&gitdir_file) else {
             continue;
         };
-        let pointer = raw.trim();
-        let pointer_path = Path::new(pointer).parent().map(canonical_or_self);
-        if pointer_path.as_deref() == Some(worktree) {
+        let pointer = Path::new(raw.trim());
+        let pointer = if pointer.is_absolute() {
+            pointer.to_path_buf()
+        } else {
+            entry.path().join(pointer)
+        };
+        if pointer.parent().map(canonical_or_self).as_deref() == Some(worktree) {
             return entry
                 .file_name()
                 .to_str()

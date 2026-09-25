@@ -802,7 +802,7 @@ impl Ctx {
             repo_key: self.repo.key(),
             worktree_id: self.repo.worktree_id(),
             worktree_path: Some(self.repo.worktree_root.to_string_lossy().to_string()),
-            base: 0,
+            block_start: 0,
             mode,
             ports: BTreeMap::new(),
         };

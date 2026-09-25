@@ -87,12 +87,13 @@ are not rewritten.
 
 ```sh
 magictree list               # linked worktrees with their ports; not the primary checkout
+magictree list --all         # every recorded worktree, in every repository, live or gone
 magictree ports              # this worktree's assignment
 magictree ports --release    # drop it: nothing stays reserved and no stack is touched
 magictree up --ports generated   # this checkout's stack, on its own block ports
 magictree down               # stop; volumes and ports are kept
 magictree restart web        # stop one service and start it again, on its own ports
-magictree rm feat/billing    # stop and remove the worktree; the branch is kept
+magictree rm feat/billing    # stop and remove the worktree; branch kept, ports released
 magictree gc                 # reclaim what deleted checkouts left behind
 ```
 
@@ -103,8 +104,20 @@ block ports instead, so a second stack can run beside the one on the declared po
 `ports --release` drops an assignment so its ports stop being reserved; the next command that
 needs them (`up`, `ports`, `env`) allocates again.
 
-`rm` accepts a path, a branch name, or a directory name, refuses a dirty worktree unless
-`--force`, and never deletes a branch.
+`list` answers for one checkout, from `git worktree list`; `list --all` answers for the whole
+machine, from the state dir, and needs no checkout at all. It groups the records by repository
+— named by its primary checkout, since the state dir stores it under a hash — and marks each
+one `live`, `gone` (the checkout no longer exists, which is what `gc --all` reclaims), or
+`primary` for the checkout a repository's own stack runs in.
+
+`rm` accepts a path, a branch name, a directory name, or an id from either listing — a row
+marked `primary` is the repository's own checkout and is refused — refuses a dirty worktree
+unless `--force`, and never deletes a branch. An id is resolved in the current repository
+first, then in the state dir's records, so a worktree of any repository magictree knows can be
+removed from anywhere; an id two repositories share is refused, and the checkouts are named
+instead. A removal is the end of the worktree, not only of its checkout: the branch is kept,
+while its port block is released and its generated state directory is dropped, so nothing is
+left for a later `gc`.
 
 `up` and `restart` build the compose services they start, so a changed Dockerfile or build
 context is picked up by running `magictree up` again. There is no cheap way to ask Docker
@@ -451,7 +464,10 @@ keyed by repository and worktree, so **nothing is ever written into the checkout
 (`git status` stays clean without a `.gitignore` or `git/info/exclude` entry) and `gc` can
 stop a worktree's processes after its checkout is gone. `gc` reconciles one repository;
 `magictree gc --all` sweeps every repository the state dir knows about, the only way to
-reclaim one that is itself gone.
+reclaim one that is itself gone, and `magictree list --all` reports those same records —
+repository by repository, each marked live, gone, or the primary checkout — from anywhere.
+`rm` needs none of that bookkeeping: it accepts a recorded id and drops the worktree's port
+block and state itself.
 
 magictree never writes to repository `.env` files.
 

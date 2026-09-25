@@ -8,8 +8,8 @@ use magictree::ports::{self, PortRequest};
 use magictree::repo::Repo;
 use magictree::run;
 use magictree::worktrees;
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use support::Fixture;
 
@@ -514,7 +514,7 @@ fn a_worktree_named_main_does_not_share_the_primary_block() {
     )
     .expect("linked assignment");
 
-    assert_ne!(primary_block.base, linked_block.base);
+    assert_ne!(primary_block.block_start, linked_block.block_start);
     assert_eq!(
         block_count(&paths.state_dir),
         2,
@@ -529,6 +529,294 @@ fn a_worktree_named_main_does_not_share_the_primary_block() {
         "list must resolve the same identity the block was written under"
     );
     assert_ne!(rows[0].2, "-", "list must find the linked worktree's ports");
+}
+
+/// A repository with one linked worktree, both recorded in `state`, so several
+/// repositories can share one state dir the way a machine does.
+fn repo_shared_with(name: &str, state: &std::path::Path) -> (Fixture, PathBuf) {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.git_repo();
+    let added = fixture.git(&["worktree", "add", "-q", name, "-b", name]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join(name);
+
+    let paths = Paths {
+        state_dir: state.to_path_buf(),
+        config_dir: state.to_path_buf(),
+    };
+    let config = Config::default();
+    for checkout in [fixture.path().to_path_buf(), worktree.clone()] {
+        let repo = Repo::open(&checkout).expect("repo");
+        ports::ensure(
+            &paths,
+            &config,
+            &repo.key(),
+            &repo.worktree_id(),
+            &repo.worktree_root,
+            &[request("web")],
+            None,
+        )
+        .expect("assignment");
+    }
+    (fixture, worktree)
+}
+
+/// `list --all` answers for the machine, not for one checkout: every repository
+/// the state dir holds a record of, each named by its primary checkout, because
+/// the key it is stored under is an opaque hash.
+#[test]
+fn all_rows_name_every_repository_the_state_dir_knows() {
+    let home = Fixture::new();
+    let state = home.state_dir();
+    let (_alpha, _alpha_wt) = repo_shared_with("alpha", &state);
+    let (_beta, _beta_wt) = repo_shared_with("beta", &state);
+
+    let rows = worktrees::all_worktree_rows(&paths(&home));
+
+    assert_eq!(
+        rows.len(),
+        4,
+        "two repositories, each with a primary checkout and a linked worktree"
+    );
+    for id in ["alpha", "beta"] {
+        let row = rows
+            .iter()
+            .find(|row| row.worktree_id == id)
+            .unwrap_or_else(|| panic!("no row for {id}"));
+        assert!(
+            row.path.as_deref().is_some_and(|path| path.ends_with(id)),
+            "{id}: {:?}",
+            row.path
+        );
+        assert!(row.ports.contains("web="), "{id}: {}", row.ports);
+        assert_eq!(row.live, Some(true), "{id}");
+        assert!(row.repo_path.is_some(), "{id} is grouped under a name");
+    }
+    assert_eq!(
+        rows.iter().filter(|row| row.worktree_id == "main").count(),
+        2,
+        "one primary checkout per repository"
+    );
+    let named: BTreeSet<PathBuf> = rows
+        .iter()
+        .filter_map(|row| row.repo_path.clone())
+        .collect();
+    assert_eq!(
+        named.len(),
+        2,
+        "each repository is named by its own checkout"
+    );
+    for row in rows.iter().filter(|row| row.worktree_id == "main") {
+        assert_eq!(
+            row.path, row.repo_path,
+            "the primary checkout's own record names the repository"
+        );
+    }
+}
+
+/// A record outlives its checkout, and says so. That is the row `gc` reclaims,
+/// and the block behind it is why the port stays reserved until it does.
+#[test]
+fn all_rows_mark_a_checkout_that_is_gone() {
+    let (fixture, worktree, _state) = repo_with_wt("gone");
+    std::fs::remove_dir_all(&worktree).expect("delete checkout");
+
+    let rows = worktrees::all_worktree_rows(&paths(&fixture));
+
+    let ghost = rows
+        .iter()
+        .find(|row| row.worktree_id == "gone")
+        .expect("the record survives its checkout");
+    assert_eq!(ghost.live, Some(false));
+    assert!(ghost.ports.contains("web="), "{}", ghost.ports);
+    let main = rows
+        .iter()
+        .find(|row| row.worktree_id == "main")
+        .expect("primary record");
+    assert_eq!(main.live, Some(true));
+}
+
+/// `rm` is the end of a worktree, not only of its checkout: the port block and
+/// the state directory go with it, so nothing is left for a later `gc`.
+#[test]
+fn remove_releases_the_ports_and_state_of_the_worktree() {
+    let (fixture, worktree, state) = repo_with_wt("released");
+    let up = support::run(&["up"], &worktree, &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert_eq!(block_count(&state), 2);
+    assert!(
+        support::runtime_dirs(&state)
+            .iter()
+            .any(|dir| dir.ends_with("released")),
+        "`up` records the worktree's state"
+    );
+
+    let removed = support::run(&["rm", "released"], fixture.path(), &state);
+    assert!(removed.ok(), "{}", removed.combined());
+    assert!(
+        removed.stdout.contains("released block"),
+        "{}",
+        removed.combined()
+    );
+
+    assert!(!worktree.exists());
+    assert_eq!(
+        block_count(&state),
+        1,
+        "the removed worktree's block is released"
+    );
+    assert!(
+        !support::runtime_dirs(&state)
+            .iter()
+            .any(|dir| dir.ends_with("released")),
+        "its state directory goes too:\n{}",
+        removed.combined()
+    );
+    let listed = String::from_utf8_lossy(&fixture.git(&["worktree", "list"]).stdout).to_string();
+    assert!(
+        !listed.contains("released"),
+        "git's registration is gone: {listed}"
+    );
+    let branches = fixture.git(&["branch", "--list", "released"]);
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).contains("released"),
+        "removing a worktree never deletes its branch"
+    );
+}
+
+/// An id `list --all` prints is a valid `rm` target from anywhere: the record
+/// names the checkout, the checkout names its repository, and the command needs
+/// no checkout of its own.
+#[test]
+fn remove_resolves_an_id_recorded_for_another_repository() {
+    let home = Fixture::new();
+    let state = home.state_dir();
+    let (_other, worktree) = repo_shared_with("elsewhere", &state);
+    assert_eq!(block_count(&state), 2);
+
+    let removed = support::run(&["rm", "elsewhere"], home.path(), &state);
+    assert!(removed.ok(), "{}", removed.combined());
+
+    assert!(
+        !worktree.exists(),
+        "the other repository's worktree is removed"
+    );
+    assert_eq!(
+        block_count(&state),
+        1,
+        "only its primary checkout's block is kept"
+    );
+}
+
+/// Two repositories can name a worktree the same, so an id alone is then not a
+/// target: the command names the checkouts rather than remove the wrong one.
+#[test]
+fn remove_refuses_an_id_two_repositories_share() {
+    let home = Fixture::new();
+    let state = home.state_dir();
+    let (_first, one) = repo_shared_with("shared", &state);
+    let (_second, two) = repo_shared_with("shared", &state);
+
+    let removed = support::run(&["rm", "shared"], home.path(), &state);
+
+    assert!(!removed.ok(), "{}", removed.combined());
+    assert!(
+        removed
+            .combined()
+            .contains("more than one recorded worktree"),
+        "{}",
+        removed.combined()
+    );
+    assert!(
+        one.exists() && two.exists(),
+        "nothing is removed on a guess"
+    );
+}
+
+/// The primary checkout has ports and state of its own, but it is not a
+/// worktree `rm` removes: its record is a record like any other.
+#[test]
+fn remove_refuses_the_primary_checkout() {
+    let (fixture, _worktree, state) = repo_with_wt("any");
+
+    let removed = support::run(&["rm", "main"], fixture.path(), &state);
+
+    assert!(!removed.ok(), "{}", removed.combined());
+    assert!(
+        removed.combined().contains("primary checkout"),
+        "{}",
+        removed.combined()
+    );
+    assert!(fixture.path().exists(), "the checkout is left alone");
+}
+
+/// The path git writes into an administrative `gitdir` file when
+/// `worktree.useRelativePaths` is on: the worktree's `.git`, relative to the
+/// administrative directory that holds the file.
+fn relative_pointer(from_dir: &Path, to: &Path) -> String {
+    let components = |path: &Path| -> Vec<String> {
+        path.canonicalize()
+            .expect("canonical path")
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect()
+    };
+    let (from, to) = (components(from_dir), components(to));
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec!["..".to_string(); from.len() - common];
+    parts.extend(to[common..].iter().cloned());
+    parts.join("/")
+}
+
+/// A worktree's administrative `gitdir` pointer can be relative, which git
+/// writes with `worktree.useRelativePaths` and resolves against the
+/// administrative directory holding the file. Read against the directory the
+/// process happens to run in instead, no administrative directory is attributed
+/// to the worktree and `list` prints no rows at all — the ids are what it is
+/// for.
+#[test]
+fn list_names_a_worktree_git_registered_with_a_relative_path() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        "version = 1\n\n[[services]]\nid = \"web\"\ncommand = \"sleep 300\"\nport = { env = \"PORT\" }\n",
+    );
+    fixture.git_repo();
+    let added = fixture.git(&["worktree", "add", "-q", "relative", "-b", "relative"]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join("relative");
+
+    let gitdir = fixture.join(".git/worktrees/relative/gitdir");
+    let pointer = relative_pointer(
+        &fixture.join(".git/worktrees/relative"),
+        &worktree.join(".git"),
+    );
+    assert!(!pointer.starts_with('/'), "the pointer must be relative");
+    std::fs::write(&gitdir, format!("{pointer}\n")).expect("rewrite the pointer");
+
+    let paths = paths(&fixture);
+    let linked = Repo::open(&worktree).expect("linked repo");
+    ports::ensure(
+        &paths,
+        &Config::default(),
+        &linked.key(),
+        &linked.worktree_id(),
+        &linked.worktree_root,
+        &[request("web")],
+        None,
+    )
+    .expect("assignment");
+
+    let repo = Repo::open(fixture.path()).expect("repo");
+    let rows = worktrees::worktree_rows(&repo, &paths).expect("rows");
+
+    assert_eq!(rows.len(), 1, "the worktree must be named, got {rows:?}");
+    assert_eq!(rows[0].0, linked.worktree_id());
+    assert_ne!(rows[0].2, "-", "the row carries its ports");
 }
 
 #[test]

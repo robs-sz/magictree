@@ -140,8 +140,9 @@ to explain a stack without starting it.
 ```bash
 magictree new feat/billing          # create the worktree and start its stack
 magictree new feat/billing --no-up  # create only
-magictree list                      # worktrees with their ports
-magictree rm feat/billing           # stop and remove; the branch is kept
+magictree list                      # worktrees of this repository with their ports
+magictree list --all                # every recorded worktree, every repository, no checkout needed
+magictree rm feat/billing           # stop and remove; the branch is kept, its ports are released
 magictree rm feat/billing --force   # discard uncommitted changes
 magictree gc                        # reclaim ports and compose resources of deleted worktrees
 magictree gc --dry-run              # report what gc would reclaim
@@ -150,12 +151,22 @@ magictree gc --all                  # every repository the state dir knows, no c
 ```
 
 `new` places the checkout beside the primary checkout as `<repo>-<slug>`. `rm` accepts a
-path, a branch name, or a directory name. It refuses a dirty worktree unless `--force`.
-Never delete a branch as part of cleanup; `rm` never does.
+path, a branch name, a directory name, or an id either listing prints. It refuses a dirty
+worktree unless `--force`. Never delete a branch as part of cleanup; `rm` never does, and it
+releases the worktree's port block and drops its state directory itself, so nothing is left
+for `gc`.
 
 `list` shows only the repository's linked worktrees, so every row it prints is a valid
 `rm` target. The primary checkout is not a linked worktree and never appears; use `ports`
 or `status` in it for the primary stack's ports.
+
+`list --all` reads the state dir instead of a checkout, so it needs none, and reaches every
+repository magictree has recorded — including ones whose checkout is gone. It groups the rows
+by repository, named by its primary checkout, and marks each row `live`, `gone` (the checkout
+no longer exists: `gc --all` is what reclaims it), or `primary` (the repository's own
+checkout, which `rm` refuses). An id is resolved in the current repository first, then in
+those records, so `magictree rm <id>` works from any directory; an id two repositories share
+is refused and their checkouts are named instead — pass the path then.
 
 The primary checkout's ports are the ones its manifest declares, and it keeps them while
 stopped: `ports --release` drops the assignment, its reservations included, and the next

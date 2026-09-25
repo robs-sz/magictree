@@ -54,9 +54,9 @@ pub enum Command {
     Down(DownArgs),
     /// Stop the named services and start them again on their assigned ports.
     Restart(RestartArgs),
-    /// Remove a worktree after stopping its stack.
+    /// Remove a worktree: its checkout, its ports, and its state.
     Rm(RmArgs),
-    /// List worktrees of this repository with their ports.
+    /// List worktrees of this repository, or every recorded one with --all.
     List(ListArgs),
     /// Reclaim port assignments and compose resources of deleted worktrees.
     Gc(GcArgs),
@@ -161,7 +161,9 @@ pub struct NewArgs {
 
 #[derive(Args)]
 pub struct RmArgs {
-    /// Worktree path, or a branch name to resolve.
+    /// Worktree path, a branch or directory name, or the id `list` prints.
+    /// An id is resolved in this repository first, then in the state dir's
+    /// records, so `rm` reaches a worktree of any repository magictree knows.
     pub target: String,
     /// Discard uncommitted changes in the worktree.
     #[arg(long, short = 'f')]
@@ -178,6 +180,11 @@ pub struct RmArgs {
 
 #[derive(Args)]
 pub struct ListArgs {
+    /// List every worktree the state dir knows, in every repository, including
+    /// checkouts that no longer exist. Resolved from the state dir, not from
+    /// the current directory.
+    #[arg(long, short = 'A', conflicts_with = "cwd")]
+    pub all: bool,
     #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
@@ -808,8 +815,21 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
 
 fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
     let start = resolve_cwd(args.cwd)?;
-    let repo = Repo::open(&start)?;
-    let target = resolve_target(&repo, &args.target)?;
+    let paths = Paths::new()?;
+    let (repo, target) = resolve_removal(&paths, &start, &args.target)?;
+    // Read before the checkout goes away: once it is gone, the state dir's
+    // records are all that is left to drop.
+    let removed = Repo::open(&target)?;
+    if removed.is_main_worktree() {
+        bail!(
+            "{} is the primary checkout of its repository\n\n`rm` removes a linked worktree and \
+             keeps its branch; the primary checkout has its own ports and is never removed",
+            target.display()
+        );
+    }
+    let (repo_key, worktree_id) = (removed.key(), removed.worktree_id());
+    let runtime_dir = paths.worktree_dir(&repo_key, &worktree_id);
+    let timeout = Duration::from_secs(Config::load(&paths)?.stop_timeout_secs);
     if dry_run {
         println!("dry run: nothing is stopped or removed");
         println!("would run down in {}", target.display());
@@ -819,6 +839,19 @@ fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
             if args.force { " --force" } else { "" }
         );
         println!("the branch would be kept");
+        if runtime_dir.is_dir() {
+            println!(
+                "would remove the recorded state in {}",
+                runtime_dir.display()
+            );
+        }
+        if let Some(assignment) = ports::load(&paths, &repo_key, &worktree_id)? {
+            println!(
+                "would release its port block {} (ports {})",
+                assignment.block_start,
+                worktrees::describe_ports(&assignment)
+            );
+        }
         return Ok(());
     }
 
@@ -826,14 +859,7 @@ fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
         // Stop whatever this worktree recorded, even if its manifest is gone or
         // no longer parses. Without this the checkout disappears while its
         // processes keep running and their pid files with it.
-        if !target.exists() {
-            bail!(
-                "worktree checkout {} is already gone\n\nrun `magictree gc --prune` to release its \
-                 port block and drop its recorded processes",
-                target.display()
-            );
-        }
-        let runtime_dir = runtime_dir_for(&Paths::new()?, &Repo::open(&target)?);
+        let runtime_dir = runtime_dir_for(&paths, &removed);
         match ctx_stop_recorded(&runtime_dir) {
             Ok(stopped) => {
                 for name in stopped {
@@ -858,16 +884,152 @@ fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
 
     worktrees::remove(&repo, &target, args.force)?;
     println!("removed {} (branch kept)", target.display());
+    worktrees::forget(&paths, &repo_key, &worktree_id, timeout)?;
     let _ = paths_cleanup(&repo);
     Ok(())
 }
 
+/// The checkout `rm` was asked for, and the repository its removal runs in.
+///
+/// A target the current checkout does not resolve is looked up in the state
+/// dir's records, because an id `list --all` prints names a worktree of some
+/// repository and not necessarily of the one the command runs in. The record
+/// names the checkout, the checkout names its repository, and the repository is
+/// asked whether it still holds that worktree before anything is removed.
+fn resolve_removal(paths: &Paths, start: &Path, target: &str) -> Result<(Repo, PathBuf)> {
+    if let Some(repo) = Repo::open_optional(start)? {
+        if let Some(path) = worktrees::find_worktree(&repo, target)? {
+            return Ok((repo, path));
+        }
+    }
+    let matches = worktrees::recorded_matches(paths, target);
+    let row = match matches.len() {
+        0 => bail!("no worktree matches '{target}'"),
+        1 => &matches[0],
+        _ => {
+            let mut lines = String::new();
+            for row in &matches {
+                let where_ = row
+                    .path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| format!("(no path recorded, repository {})", row.repo_key));
+                lines.push_str(&format!("\n  {where_}"));
+            }
+            bail!(
+                "'{target}' names more than one recorded worktree:{lines}\n\npass the checkout \
+                 path instead"
+            );
+        }
+    };
+    let path = row
+        .path
+        .clone()
+        .with_context(|| format!("the record of '{target}' names no checkout"))?;
+    if !path.exists() {
+        bail!(
+            "worktree '{}' ({}) is already gone\n\nrun `magictree gc --all` to release its port \
+             block and drop its recorded processes",
+            row.worktree_id,
+            path.display()
+        );
+    }
+    let found = Repo::open(&path)?;
+    if found.key() != row.repo_key {
+        bail!(
+            "{} is not the worktree the record was written for\n\nrun `magictree gc --all` to \
+             reclaim the record",
+            path.display()
+        );
+    }
+    // `remove` runs git from a repository root, which is not the checkout being
+    // removed: from inside itself a worktree would read as the current one.
+    let repo = Repo::open(&found.main_worktree_root())?;
+    Ok((repo, path))
+}
+
 fn cmd_list(args: ListArgs) -> Result<()> {
     let paths = Paths::new()?;
+    if args.all {
+        return list_all(&paths);
+    }
     let repo = Repo::open(&resolve_cwd(args.cwd)?)?;
+    let rows = worktrees::worktree_rows(&repo, &paths)?;
+    if rows.is_empty() {
+        // An empty list is otherwise indistinguishable from a broken one, and
+        // the primary checkout is the case people look for first: it is a stack
+        // magictree runs, but it is not a worktree `rm` can remove.
+        println!(
+            "no linked worktrees in this repository\n\nthe primary checkout is not one: run \
+             `magictree status` for its stack, or `magictree list --all` for every worktree \
+             magictree has recorded"
+        );
+        return Ok(());
+    }
     println!("{:<10} {:<44} ports", "worktree", "path");
-    for (id, path, ports) in worktrees::worktree_rows(&repo, &paths)? {
+    for (id, path, ports) in rows {
         println!("{id:<10} {:<44} {ports}", path.display());
+    }
+    Ok(())
+}
+
+/// `list --all`: every worktree the state dir holds a record of, across every
+/// repository it knows.
+///
+/// Rows are grouped by repository, because a record is only meaningful with the
+/// repository it was written for, and the state dir keys that by an opaque hash:
+/// the group is named by the primary checkout a record names, and only by the
+/// key when no record named one. Nothing here is resolved from the current
+/// directory, so `-C` has no part in it.
+fn list_all(paths: &Paths) -> Result<()> {
+    let rows = worktrees::all_worktree_rows(paths);
+    if rows.is_empty() {
+        println!("no worktrees recorded");
+        return Ok(());
+    }
+    let mut gone = 0usize;
+    let mut current: Option<&str> = None;
+    for row in &rows {
+        if current != Some(row.repo_key.as_str()) {
+            if current.is_some() {
+                println!();
+            }
+            current = Some(row.repo_key.as_str());
+            match &row.repo_path {
+                Some(path) => println!("{}", path.display()),
+                None => println!("{}", row.repo_key),
+            }
+        }
+        let path = row
+            .path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let ports = if row.ports.is_empty() {
+            "-"
+        } else {
+            row.ports.as_str()
+        };
+        // `live` is the rule `gc` reclaims by, so the two name the same set of
+        // leftovers: a path that is no longer a worktree of its repository.
+        // The primary checkout is a record like any other, but `rm` never
+        // removes it, so its row says which one it is instead of just "live".
+        let state = match row.live {
+            Some(true) if row.worktree_id == crate::repo::PRIMARY_WORKTREE_ID => "primary",
+            Some(true) => "live",
+            Some(false) => {
+                gone += 1;
+                "gone"
+            }
+            None => "?",
+        };
+        println!(
+            "  {:<10} {:<5} {:<44} {ports}",
+            row.worktree_id, state, path
+        );
+    }
+    if gone > 0 {
+        println!("\n{gone} gone; `magictree gc --all` reclaims what they left behind");
     }
     Ok(())
 }
@@ -913,26 +1075,6 @@ fn ctx_stop_recorded(runtime_dir: &Path) -> Result<Vec<String>> {
             .map(|(name, _)| name)
             .collect()
     })
-}
-
-/// Accept a path, a branch name, or a directory name for `rm`.
-fn resolve_target(repo: &Repo, target: &str) -> Result<PathBuf> {
-    let direct = PathBuf::from(target);
-    if direct.is_dir() {
-        return Ok(direct.canonicalize().unwrap_or(direct));
-    }
-    for entry in repo.worktrees()? {
-        let matches_branch = entry.branch.as_deref() == Some(target);
-        let matches_dir = entry
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy() == target)
-            .unwrap_or(false);
-        if matches_branch || matches_dir {
-            return Ok(entry.path);
-        }
-    }
-    bail!("no worktree matches '{target}'");
 }
 
 fn resolve_cwd(cwd: Option<PathBuf>) -> Result<PathBuf> {
@@ -1861,11 +2003,17 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
     )?;
     let block = format!(
         "{}-{}",
-        assignment.base,
-        assignment.base.saturating_add(ctx.config.port_stride - 1)
+        assignment.block_start,
+        assignment
+            .block_start
+            .saturating_add(ctx.config.port_stride - 1)
     );
     let in_block = assignment.ports.values().any(|port| {
-        *port >= assignment.base && *port < assignment.base.saturating_add(ctx.config.port_stride)
+        *port >= assignment.block_start
+            && *port
+                < assignment
+                    .block_start
+                    .saturating_add(ctx.config.port_stride)
     });
     println!(
         "worktree {} ({})",
@@ -2029,7 +2177,7 @@ static EMPTY_ASSIGNMENT: ports::Assignment = ports::Assignment {
     repo_key: String::new(),
     worktree_id: String::new(),
     worktree_path: None,
-    base: 0,
+    block_start: 0,
     mode: ports::PortMode::Declared,
     ports: BTreeMap::new(),
 };

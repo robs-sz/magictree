@@ -49,8 +49,10 @@ pub struct Assignment {
     /// blocks left behind by removed worktrees.
     #[serde(default)]
     pub worktree_path: Option<String>,
-    /// First port of the worktree's block.
-    pub base: u16,
+    /// First port of the worktree's block. Read from `base` in assignments
+    /// written before the field was named for the block it starts.
+    #[serde(alias = "base")]
+    pub block_start: u16,
     /// How these ports were chosen. Absent in assignments written before the
     /// field existed; `ensure` then applies the mode this worktree defaults to.
     #[serde(default)]
@@ -148,7 +150,7 @@ pub fn ensure(
             changed = true;
         }
         if changed {
-            write_assignment(&block_path(&blocks, assignment.base), &assignment)?;
+            write_assignment(&block_path(&blocks, assignment.block_start), &assignment)?;
         }
         return Ok(assignment);
     }
@@ -160,12 +162,12 @@ pub fn ensure(
     let start = (hash64(&format!("{repo_key}:{worktree_id}")) % slots as u64) as u32;
     for step in 0..slots {
         let slot = (start + step) % slots;
-        let base = config.port_range_start + (slot * config.port_stride as u32) as u16;
-        let path = block_path(&blocks, base);
+        let block_start = config.port_range_start + (slot * config.port_stride as u32) as u16;
+        let path = block_path(&blocks, block_start);
         if path.exists() {
             continue;
         }
-        let ports = match assign_in_block(config, base, requests, &taken, mode)? {
+        let ports = match assign_in_block(config, block_start, requests, &taken, mode)? {
             BlockOutcome::Assigned(ports) => ports,
             BlockOutcome::Unusable => continue,
         };
@@ -174,7 +176,7 @@ pub fn ensure(
             repo_key: repo_key.to_string(),
             worktree_id: worktree_id.to_string(),
             worktree_path: Some(worktree_path.to_string_lossy().to_string()),
-            base,
+            block_start,
             mode,
             ports,
         };
@@ -215,11 +217,11 @@ pub fn release(paths: &Paths, repo_key: &str, worktree_id: &str) -> Result<Optio
         return Ok(None);
     };
     release_assignment(&blocks, &assignment)?;
-    Ok(Some(block_path(&blocks, assignment.base)))
+    Ok(Some(block_path(&blocks, assignment.block_start)))
 }
 
 fn release_assignment(blocks: &Path, assignment: &Assignment) -> Result<()> {
-    let path = block_path(blocks, assignment.base);
+    let path = block_path(blocks, assignment.block_start);
     if path.exists() {
         std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
@@ -266,7 +268,7 @@ fn extend(
         }
     }
     for offset in 0..config.port_stride {
-        let candidate = assignment.base + offset;
+        let candidate = assignment.block_start + offset;
         if candidate > config.port_range_end {
             break;
         }
@@ -277,14 +279,14 @@ fn extend(
     }
     bail!(
         "no free port left in block {} for '{}'; run `magictree ports --reassign`",
-        assignment.base,
+        assignment.block_start,
         request.name
     )
 }
 
 fn assign_in_block(
     config: &Config,
-    base: u16,
+    block_start: u16,
     requests: &[PortRequest],
     taken: &HashMap<u16, String>,
     mode: PortMode,
@@ -347,7 +349,7 @@ fn assign_in_block(
         }
         let mut assigned = None;
         while offset < config.port_stride {
-            let candidate = base + offset;
+            let candidate = block_start + offset;
             offset += 1;
             if candidate > config.port_range_end {
                 return Ok(BlockOutcome::Unusable);
@@ -447,8 +449,8 @@ fn find_assignment(blocks: &Path, repo_key: &str, worktree_id: &str) -> Result<O
     }))
 }
 
-fn block_path(blocks: &Path, base: u16) -> PathBuf {
-    blocks.join(format!("{base}.json"))
+fn block_path(blocks: &Path, block_start: u16) -> PathBuf {
+    blocks.join(format!("{block_start}.json"))
 }
 
 fn claim(path: &Path, assignment: &Assignment) -> Result<bool> {

@@ -66,7 +66,7 @@ fn assignments_are_stable_across_calls() {
     )
     .expect("allocate again");
 
-    assert_eq!(first.base, second.base);
+    assert_eq!(first.block_start, second.block_start);
     assert_eq!(first.ports.get("web"), second.ports.get("web"));
 }
 
@@ -97,7 +97,7 @@ fn different_worktrees_of_one_repository_get_different_blocks() {
     )
     .expect("allocate b");
 
-    assert_ne!(left.base, right.base);
+    assert_ne!(left.block_start, right.block_start);
     assert_ne!(left.ports.get("web"), right.ports.get("web"));
 }
 
@@ -545,8 +545,8 @@ fn blocks_skip_over_a_range_that_is_already_busy() {
         None,
     )
     .expect("allocate");
-    let base = first.base;
-    let _guard = PortGuard::occupy(base);
+    let block_start = first.block_start;
+    let _guard = PortGuard::occupy(block_start);
 
     ports::release(&paths, "repo", "wt-a").expect("release");
     let second = ports::ensure(
@@ -561,7 +561,7 @@ fn blocks_skip_over_a_range_that_is_already_busy() {
     .expect("allocate around the conflict");
 
     assert_ne!(
-        second.base, base,
+        second.block_start, block_start,
         "a block whose ports are busy must be skipped"
     );
 }
