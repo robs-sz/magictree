@@ -104,6 +104,8 @@ output. It is idempotent: run it any time. It is safe to re-run after editing `m
 It exits non-zero and explains itself when a service fails to become healthy: on failure
 everything stays running so it can be inspected.
 
+`up` prints a numbered step per unit of work, so a long pause is attributable to the step it follows. `--quiet` keeps only the step headers, failures, and the final URL summary; `--verbose` streams a bootstrap command's own output under its step instead of letting the command write to the terminal itself.
+
 `up` and `restart` build the compose services they start, which is how a changed Dockerfile or
 build context is picked up; Compose validates its cache, so an unchanged context is a cache
 hit rather than a rebuild. `build` in `~/.config/magictree/config.toml` sets the default —

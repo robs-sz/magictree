@@ -144,6 +144,11 @@ never built and never asked about.
 
 `--dry-run` works on every command and creates nothing: `magictree -n up`.
 
+`up` prints a numbered step per unit of work. `up --quiet` keeps only the step headers,
+failures, and the URL summary; `up --verbose` streams a bootstrap command's output under its
+step. With `reconcile = "auto"` in `config.toml`, `up --refresh` forces a full Compose
+reconcile for one run.
+
 Flags with an unambiguous short form carry one — `-n` for `--dry-run`, `-C` for `--cwd`,
 `-f` for `--force`, `-v` for `--volumes`, `-b` for `--build`, `-e` for `--export`, `-A` for
 `--all`, and so on.
