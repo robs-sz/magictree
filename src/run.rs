@@ -210,15 +210,59 @@ pub fn log_tail(runtime_dir: &Path, name: &str, lines: usize) -> Vec<String> {
     all[start..].iter().map(|line| line.to_string()).collect()
 }
 
-/// Run a command to completion in the foreground.
-pub fn run_once(command: &str, cwd: &Path, env: &BTreeMap<String, String>) -> Result<()> {
-    let status = Command::new("sh")
+/// Run a command to completion in the foreground. With `verbose`, the command's
+/// output is relayed through magictree, indented, instead of the child writing
+/// to the terminal itself.
+pub fn run_once(
+    command: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    verbose: bool,
+) -> Result<()> {
+    if !verbose {
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(cwd)
+            .envs(env)
+            .status()
+            .with_context(|| format!("running '{command}'"))?;
+        anyhow::ensure!(status.success(), "'{command}' exited with {status}");
+        return Ok(());
+    }
+    let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
         .envs(env)
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("running '{command}'"))?;
+    let reader = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let out_thread = std::thread::spawn(move || relay(reader));
+    let err_thread = std::thread::spawn(move || relay(stderr));
+    let status = child
+        .wait()
+        .with_context(|| format!("running '{command}'"))?;
+    let _ = out_thread.join();
+    let _ = err_thread.join();
     anyhow::ensure!(status.success(), "'{command}' exited with {status}");
     Ok(())
+}
+
+/// Relay a child's output line by line, indented under its step.
+fn relay(reader: impl std::io::Read) {
+    use std::io::BufRead;
+    let mut stdout = std::io::stdout();
+    for line in std::io::BufReader::new(reader).lines() {
+        match line {
+            Ok(line) => {
+                let _ = writeln!(stdout, "     | {line}");
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = stdout.flush();
 }

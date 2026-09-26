@@ -317,6 +317,599 @@ esac
     );
 }
 
+// --- Compose reconciliation fixtures -----------------------------------------
+
+const COMPOSE_FIXTURE_MANIFEST: &str = r#"
+version = 1
+
+[[services]]
+id = "db"
+compose = { file = "compose.yaml", service = "db" }
+
+[[services]]
+id = "cache"
+compose = { file = "compose.yaml", service = "cache" }
+
+[[services]]
+id = "dependent"
+compose = { file = "compose.yaml", service = "dependent" }
+
+[[services]]
+id = "init"
+compose = { file = "compose.yaml", service = "init" }
+wait = "exit"
+
+[[services]]
+id = "after-init"
+compose = { file = "compose.yaml", service = "after-init" }
+needs = ["init"]
+"#;
+
+const COMPOSE_FIXTURE_FILE: &str = r#"services:
+  db:
+    image: example/db
+  cache:
+    image: example/cache
+  dependent:
+    image: example/dependent
+  init:
+    image: example/init
+  after-init:
+    image: example/after-init
+"#;
+
+const COMPOSE_FAKE_CONFIG: &str = r#"{"services":{"db":{"image":"busybox"},"cache":{"image":"busybox"},"dependent":{"image":"busybox"},"init":{"image":"busybox"},"after-init":{"image":"busybox"}}}"#;
+
+/// Every container running, the one-shot already finished successfully.
+const PS_ALL_UP: &str = r#"[{"Service":"db","State":"running"},{"Service":"cache","State":"running"},{"Service":"dependent","State":"running"},{"Service":"init","State":"exited","ExitCode":0},{"Service":"after-init","State":"running"}]"#;
+
+/// One service needs starting, the one-shot already finished.
+const PS_DEPENDENT_CREATED: &str = r#"[{"Service":"db","State":"running"},{"Service":"cache","State":"running"},{"Service":"dependent","State":"created"},{"Service":"init","State":"exited","ExitCode":0},{"Service":"after-init","State":"running"}]"#;
+
+/// A repository with one compose project, ready for a fake docker CLI.
+fn compose_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write("compose.yaml", COMPOSE_FIXTURE_FILE);
+    fixture.write("magictree.toml", COMPOSE_FIXTURE_MANIFEST);
+    fixture.git_repo();
+    fixture
+}
+
+/// Install a fake `docker` that logs every call, answers `ps` and `config` from
+/// the environment, and succeeds otherwise.
+fn fake_docker(fixture: &Fixture) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fixture.state_dir().join("bin");
+    std::fs::create_dir_all(&dir).expect("docker dir");
+    let docker = dir.join("docker");
+    std::fs::write(
+        &docker,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$MAGICTREE_DOCKER_LOG"
+case "$*" in
+  *" ps -a --format json"*)
+    if [ -n "$MAGICTREE_FAKE_DEPENDENT_CREATED" ] && [ ! -f "$MAGICTREE_DOCKER_LOG.started" ]; then
+      printf '%s\n' 'PS_DEPENDENT_CREATED_PLACEHOLDER'
+    else
+      printf '%s\n' "$MAGICTREE_FAKE_PS"
+    fi
+    ;;
+  *" up -d "*)
+    : > "$MAGICTREE_DOCKER_LOG.started"
+    ;;
+  *" config --format json"*)
+    printf '%s' "$MAGICTREE_FAKE_CONFIG"
+    if [ -n "$MAGICTREE_DOCKER_CONFIG_DRIFT" ]; then
+      printf '%s' "$MAGICTREE_DOCKER_CONFIG_DRIFT"
+    fi
+    printf '\n'
+    ;;
+esac
+exit 0
+"#
+        .replace("PS_DEPENDENT_CREATED_PLACEHOLDER", PS_DEPENDENT_CREATED),
+    )
+    .expect("write fake docker");
+    let mut permissions = std::fs::metadata(&docker)
+        .expect("fake docker metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&docker, permissions).expect("make fake docker executable");
+    dir
+}
+
+/// Run `up` against the compose fixture with the fake docker on PATH.
+fn run_compose(
+    fixture: &Fixture,
+    docker_dir: &Path,
+    ps: &str,
+    config_text: &str,
+    drift: Option<&str>,
+    dependent_created: bool,
+    args: &[&str],
+) -> support::Run {
+    let state = fixture.state_dir();
+    let mut command = std::process::Command::new(support::bin());
+    command
+        .args(args)
+        .current_dir(fixture.path())
+        .env("MAGICTREE_STATE_DIR", &state)
+        .env("MAGICTREE_CONFIG_DIR", state.join("config"))
+        .env("MAGICTREE_NO_UPDATE_CHECK", "1")
+        .env("MAGICTREE_DOCKER_LOG", state.join("docker.log"))
+        .env("MAGICTREE_FAKE_PS", ps)
+        .env("MAGICTREE_FAKE_CONFIG", config_text)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                docker_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+    if let Some(drift) = drift {
+        command.env("MAGICTREE_DOCKER_CONFIG_DRIFT", drift);
+    }
+    if dependent_created {
+        command.env("MAGICTREE_FAKE_DEPENDENT_CREATED", "1");
+    }
+    let output = command.output().expect("run magictree with fake docker");
+    support::Run {
+        status: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    }
+}
+
+/// The `up -d` service arguments of each logged Compose start, in order.
+fn up_calls(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|call| call.split_once(" up -d ").map(|(_, rest)| rest.to_string()))
+        .collect()
+}
+
+fn call_count(log: &Path, needle: &str) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|call| call.contains(needle))
+        .count()
+}
+
+fn write_config(fixture: &Fixture, contents: &str) {
+    let dir = fixture.state_dir().join("config");
+    std::fs::create_dir_all(&dir).expect("config dir");
+    std::fs::write(dir.join("config.toml"), contents).expect("config file");
+}
+
+#[test]
+fn reconcile_always_is_the_default() {
+    let fixture = compose_fixture();
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    for _ in 0..2 {
+        let out = run_compose(
+            &fixture,
+            &docker_dir,
+            PS_ALL_UP,
+            COMPOSE_FAKE_CONFIG,
+            None,
+            false,
+            &["up", "--no-build"],
+        );
+        assert!(out.ok(), "{}", out.combined());
+        assert!(!out.stdout.contains("already up"), "{}", out.stdout);
+    }
+    let calls = up_calls(&log);
+    assert_eq!(
+        calls.len(),
+        2,
+        "the default reconciles every run: {calls:?}"
+    );
+    assert!(calls.iter().all(|call| call.contains("init")), "{calls:?}");
+}
+
+#[test]
+fn reconcile_auto_skips_a_project_that_is_already_up() {
+    let fixture = compose_fixture();
+    write_config(&fixture, "reconcile = \"auto\"\n");
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    let first = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"],
+    );
+    assert!(first.ok(), "{}", first.combined());
+
+    let second = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"],
+    );
+    assert!(second.ok(), "{}", second.combined());
+    assert!(
+        second
+            .stdout
+            .contains("already up on an unchanged configuration"),
+        "{}",
+        second.stdout
+    );
+
+    let calls = up_calls(&log);
+    assert_eq!(calls.len(), 1, "only the first run starts: {calls:?}");
+    // Each run resolves the configuration once to compute the digest.
+    assert_eq!(call_count(&log, " config --format json"), 2);
+}
+
+#[test]
+fn reconcile_auto_reconciles_when_the_configuration_changed() {
+    let fixture = compose_fixture();
+    write_config(&fixture, "reconcile = \"auto\"\n");
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    assert!(run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"]
+    )
+    .ok());
+    let second = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        Some("\n# drifted\n"),
+        false,
+        &["up", "--no-build"],
+    );
+    assert!(second.ok(), "{}", second.combined());
+    assert!(!second.stdout.contains("already up"), "{}", second.stdout);
+    assert_eq!(
+        up_calls(&log).len(),
+        2,
+        "a changed configuration reconciles"
+    );
+}
+
+#[test]
+fn reconcile_auto_leaves_a_finished_one_shot_out() {
+    let fixture = compose_fixture();
+    write_config(&fixture, "reconcile = \"auto\"\n");
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    // First run records the configuration.
+    assert!(run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"]
+    )
+    .ok());
+    // Second run: one service needs starting, the one-shot already finished.
+    let started_marker = fixture.state_dir().join("docker.log.started");
+    let _ = std::fs::remove_file(&started_marker);
+    let second = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        true,
+        &["up", "--no-build"],
+    );
+    assert!(second.ok(), "{}", second.combined());
+    let calls = up_calls(&log);
+    assert_eq!(
+        calls.last().map(String::as_str),
+        Some("db cache dependent after-init"),
+        "a finished one-shot is not re-run: {calls:?}"
+    );
+}
+
+#[test]
+fn up_refresh_reconciles_under_auto() {
+    let fixture = compose_fixture();
+    write_config(&fixture, "reconcile = \"auto\"\n");
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    assert!(run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"]
+    )
+    .ok());
+    // A plain second run skips.
+    assert!(run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"]
+    )
+    .ok());
+    // --refresh forces it.
+    let refreshed = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build", "--refresh"],
+    );
+    assert!(refreshed.ok(), "{}", refreshed.combined());
+    assert!(
+        !refreshed.stdout.contains("already up"),
+        "{}",
+        refreshed.stdout
+    );
+    let calls = up_calls(&log);
+    assert_eq!(
+        calls.len(),
+        2,
+        "the skip run did not start, the refresh did: {calls:?}"
+    );
+    assert!(calls.last().unwrap().contains("init"), "{calls:?}");
+}
+
+#[test]
+fn up_builds_by_default_under_the_shipped_config() {
+    let fixture = compose_fixture();
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    let out = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up"],
+    );
+    assert!(out.ok(), "{}", out.combined());
+    let calls = up_calls(&log);
+    assert!(
+        calls
+            .first()
+            .is_some_and(|call| call.starts_with("--build ")),
+        "the shipped default builds: {calls:?}"
+    );
+}
+
+#[test]
+fn up_never_builds_when_configured() {
+    let fixture = compose_fixture();
+    write_config(&fixture, "build = \"never\"\n");
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    let out = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up"],
+    );
+    assert!(out.ok(), "{}", out.combined());
+    let calls = up_calls(&log);
+    assert!(
+        calls.first().is_some_and(|call| !call.contains("--build")),
+        "build = \"never\" does not build: {calls:?}"
+    );
+}
+
+#[test]
+fn up_build_overrides_a_never_config() {
+    let fixture = compose_fixture();
+    write_config(&fixture, "build = \"never\"\n");
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    let out = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--build"],
+    );
+    assert!(out.ok(), "{}", out.combined());
+    let calls = up_calls(&log);
+    assert!(
+        calls
+            .first()
+            .is_some_and(|call| call.starts_with("--build ")),
+        "--build overrides the config: {calls:?}"
+    );
+}
+
+#[test]
+fn up_numbers_its_steps() {
+    let fixture = host_stack_fixture();
+    let state = fixture.state_dir();
+
+    let up = run(&["up"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    let numbers: Vec<(usize, usize)> = up
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix('[')?;
+            let (index, rest) = rest.split_once('/')?;
+            let (total, _) = rest.split_once(']')?;
+            Some((index.parse().ok()?, total.parse().ok()?))
+        })
+        .collect();
+    assert_eq!(
+        numbers,
+        vec![(1, 2), (2, 2)],
+        "the plan numbers the bootstrap step then the service:\n{}",
+        up.stdout
+    );
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn up_quiet_prints_only_headers() {
+    let fixture = host_stack_fixture();
+    let state = fixture.state_dir();
+
+    let up = run(&["up", "--quiet"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        up.stdout.contains("[1/2]"),
+        "headers still print: {}",
+        up.stdout
+    );
+    assert!(
+        !up.stdout.contains("idle: started"),
+        "details are suppressed: {}",
+        up.stdout
+    );
+    assert!(
+        up.stdout.contains("http://localhost:"),
+        "the URL summary always prints: {}",
+        up.stdout
+    );
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn up_verbose_prefixes_command_output() {
+    let fixture = Fixture::new();
+    let marker = fixture.state_dir().join("boot.txt");
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"
+version = 1
+
+[bootstrap]
+run = ["echo bootstrapped && echo done > '{}'"]
+
+[[services]]
+id = "idle"
+command = "sleep 300"
+port = {{ env = "PORT" }}
+"#,
+            marker.display()
+        ),
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+
+    let up = run(&["up", "--verbose"], fixture.path(), &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        up.stdout.contains("     | bootstrapped"),
+        "the command's output streams under its step:\n{}",
+        up.stdout
+    );
+    assert!(marker.exists(), "the command still ran");
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn a_state_dir_from_a_version_without_compose_json_reconciles() {
+    // The absence of `compose.json` is the state a version before this one
+    // leaves; the next `up` reconciles and writes it, rather than erroring.
+    let fixture = compose_fixture();
+    write_config(&fixture, "reconcile = \"auto\"\n");
+    let docker_dir = fake_docker(&fixture);
+
+    assert!(run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"]
+    )
+    .ok());
+    let runtime = runtime_dirs(&fixture.state_dir());
+    let compose_json = runtime[0].join("compose.json");
+    assert!(compose_json.exists(), "the first run records it");
+    std::fs::remove_file(&compose_json).expect("drop the record");
+
+    let again = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["up", "--no-build"],
+    );
+    assert!(again.ok(), "{}", again.combined());
+    assert!(compose_json.exists(), "the record is written again");
+}
+
+#[test]
+fn the_shipped_config_builds_and_reconciles() {
+    // No config file, no new manifest fields: the pre-change behaviour, end to
+    // end. Both runs build and reconcile.
+    let fixture = compose_fixture();
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    for _ in 0..2 {
+        let out = run_compose(
+            &fixture,
+            &docker_dir,
+            PS_ALL_UP,
+            COMPOSE_FAKE_CONFIG,
+            None,
+            false,
+            &["up"],
+        );
+        assert!(out.ok(), "{}", out.combined());
+        assert!(!out.stdout.contains("already up"), "{}", out.stdout);
+    }
+    let calls = up_calls(&log);
+    assert_eq!(calls.len(), 2, "both runs reconcile: {calls:?}");
+    assert!(
+        calls.iter().all(|call| call.starts_with("--build ")),
+        "{calls:?}"
+    );
+}
+
 #[test]
 fn down_reaps_a_process_whose_service_was_renamed_away() {
     let fixture = host_stack_fixture();
@@ -471,6 +1064,68 @@ health = { http = "/", timeout = 30 }
         fixture.join("client.gen.ts").exists(),
         "bootstrap produced the generated file"
     );
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn bootstrap_outputs_rerun_only_when_missing() {
+    // A generation step that declares what it produces runs when that artefact
+    // is gone, and is skipped while it is still there.
+    let fixture = Fixture::new();
+    let appended = fixture.state_dir().join("generated.log");
+    fixture.write(
+        "justfile",
+        &format!(
+            "generate:\n  echo 'export const client = 1' > client.gen.ts\n  echo gen >> '{}'\n",
+            appended.display()
+        ),
+    );
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[bootstrap]
+run = [{ command = "just generate", outputs = ["client.gen.ts"] }]
+
+[[services]]
+id = "web"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+    let runs = || {
+        std::fs::read_to_string(&appended)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    let first = run(&["up"], fixture.path(), &state);
+    assert!(first.ok(), "{}", first.combined());
+    assert_eq!(runs(), 1, "the first up generates the output");
+    assert!(
+        first.stdout.contains("run just generate: ok"),
+        "{}",
+        first.stdout
+    );
+
+    let second = run(&["up"], fixture.path(), &state);
+    assert!(second.ok(), "{}", second.combined());
+    assert_eq!(runs(), 1, "a present output skips the step");
+    assert!(
+        second.stdout.contains("run just generate: present"),
+        "{}",
+        second.stdout
+    );
+
+    std::fs::remove_file(fixture.join("client.gen.ts")).expect("remove generated file");
+    let third = run(&["up"], fixture.path(), &state);
+    assert!(third.ok(), "{}", third.combined());
+    assert_eq!(runs(), 2, "a missing output runs the step again");
+
     assert!(run(&["down"], fixture.path(), &state).ok());
 }
 
@@ -1578,6 +2233,123 @@ port = { env = "PORT" }
     assert!(down.ok(), "{}", down.combined());
 }
 
+fn is_symlink(path: &Path) -> bool {
+    path.symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// A repository whose bootstrap install declares `node_modules` as its output
+/// and shares it: the shape the `sync` gate has to judge.
+fn sync_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[bootstrap]
+sync = ["node_modules"]
+run = [{ command = "mkdir -p node_modules && echo run >> node_modules/.installed", inputs = ["pnpm-lock.yaml"], outputs = ["node_modules"] }]
+
+[[services]]
+id = "web"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    fixture.git_repo();
+    fixture
+}
+
+#[test]
+fn sync_refuses_a_linked_output_whose_lockfile_differs() {
+    let fixture = sync_fixture();
+    let state = fixture.state_dir();
+    // Install in the primary checkout so its state records the digest the
+    // worktree's link has to answer.
+    assert!(run(&["up"], fixture.path(), &state).ok());
+    assert!(fixture.join("node_modules/.installed").exists());
+    assert!(run(&["down"], fixture.path(), &state).ok());
+
+    let added = fixture.git(&["worktree", "add", "-q", "wt", "-b", "wt"]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join("wt");
+    // The worktree's lockfile is not the one the primary checkout installed.
+    std::fs::write(
+        worktree.join("pnpm-lock.yaml"),
+        "lockfileVersion: 9\n# drifted\n",
+    )
+    .expect("edit lockfile");
+
+    let up = run(&["up"], &worktree, &state);
+    assert!(up.ok(), "{}", up.combined());
+    assert!(
+        !is_symlink(&worktree.join("node_modules")),
+        "a differing lockfile must not be linked:\n{}",
+        up.combined()
+    );
+    assert!(up.stdout.contains("left to install"), "{}", up.stdout);
+    assert!(
+        up.stdout.contains(": ok"),
+        "the install runs in the worktree: {}",
+        up.stdout
+    );
+
+    let again = run(&["up"], &worktree, &state);
+    assert!(again.ok(), "{}", again.combined());
+    assert!(
+        again.stdout.contains(": cached"),
+        "a local install is cached against the worktree's lockfile: {}",
+        again.stdout
+    );
+
+    assert!(run(&["down"], &worktree, &state).ok());
+}
+
+#[test]
+fn sync_false_neither_links_nor_trusts_a_link() {
+    let fixture = sync_fixture();
+    let state = fixture.state_dir();
+    assert!(run(&["up"], fixture.path(), &state).ok());
+    assert!(run(&["down"], fixture.path(), &state).ok());
+
+    let added = fixture.git(&["worktree", "add", "-q", "wt", "-b", "wt"]);
+    assert!(added.status.success(), "git worktree add");
+    let worktree = fixture.join("wt");
+
+    // First run, with the default: the primary checkout's install is linked.
+    let linked = run(&["up"], &worktree, &state);
+    assert!(linked.ok(), "{}", linked.combined());
+    assert!(
+        is_symlink(&worktree.join("node_modules")),
+        "the default links the primary install:\n{}",
+        linked.combined()
+    );
+    assert!(run(&["down"], &worktree, &state).ok());
+
+    // The machine turns sharing off.
+    std::fs::create_dir_all(state.join("config")).expect("config dir");
+    std::fs::write(state.join("config/config.toml"), "sync = false\n").expect("config file");
+
+    let own = run(&["up"], &worktree, &state);
+    assert!(own.ok(), "{}", own.combined());
+    assert!(own.stdout.contains("disabled by config"), "{}", own.stdout);
+    assert!(
+        !is_symlink(&worktree.join("node_modules")),
+        "sync = false must not leave a link behind:\n{}",
+        own.combined()
+    );
+    assert!(
+        own.stdout.contains(": ok"),
+        "the install runs locally: {}",
+        own.stdout
+    );
+
+    assert!(run(&["down"], &worktree, &state).ok());
+}
+
 /// A host-process stack whose single port is declared, the way a repository
 /// whose own tooling expects a fixed port declares one.
 fn declared_stack_fixture(port: u16) -> Fixture {
@@ -2089,6 +2861,248 @@ port = {{ env = "PORT" }}
         !marker.exists() && again.stdout.contains("skipped"),
         "a declined step must stay uncached:\n{}",
         again.stdout
+    );
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+// --- logs --------------------------------------------------------------------
+
+/// Two host services that each write a line and then idle.
+fn logging_host_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[[services]]
+id = "first"
+command = "echo first-line; sleep 300"
+port = { env = "PORT" }
+
+[[services]]
+id = "second"
+command = "echo second-line; sleep 300"
+port = { env = "PORT2" }
+"#,
+    );
+    fixture.git_repo();
+    fixture
+}
+
+/// One host service that writes `count` numbered lines, then idles.
+fn numbered_host_fixture(count: usize) -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        &format!(
+            r#"
+version = 1
+
+[[services]]
+id = "noisy"
+command = "for i in $(seq 1 {count}); do echo line-$i; done; sleep 300"
+port = {{ env = "PORT" }}
+"#
+        ),
+    );
+    fixture.git_repo();
+    fixture
+}
+
+#[test]
+fn logs_all_shows_every_service_of_the_scope() {
+    let fixture = logging_host_fixture();
+    let state = fixture.state_dir();
+    assert!(run(&["up"], fixture.path(), &state).ok());
+
+    let logs = run(&["logs", "--all"], fixture.path(), &state);
+    assert!(logs.ok(), "{}", logs.combined());
+    let first = logs.stdout.find("== first ==").expect("first section");
+    let second = logs.stdout.find("== second ==").expect("second section");
+    assert!(
+        first < second,
+        "sections follow start order:\n{}",
+        logs.stdout
+    );
+
+    let tailed = run(&["logs", "--all", "--lines", "1"], fixture.path(), &state);
+    assert!(tailed.ok(), "{}", tailed.combined());
+    assert_eq!(
+        tailed.stdout.matches("line").count(),
+        2,
+        "--lines applies to each section:\n{}",
+        tailed.stdout
+    );
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn logs_with_one_positional_still_tails_forty_lines() {
+    let fixture = numbered_host_fixture(50);
+    let state = fixture.state_dir();
+    assert!(run(&["up"], fixture.path(), &state).ok());
+
+    let default = run(&["logs", "noisy"], fixture.path(), &state);
+    assert!(default.ok(), "{}", default.combined());
+    assert_eq!(
+        default.stdout.lines().count(),
+        40,
+        "the default tail is 40 lines"
+    );
+    assert!(!default.stdout.contains("line-1\n"), "{}", default.stdout);
+
+    let three = run(&["logs", "noisy", "--lines", "3"], fixture.path(), &state);
+    assert!(three.ok(), "{}", three.combined());
+    assert_eq!(three.stdout.lines().count(), 3, "{}", three.stdout);
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn logs_full_prints_what_the_tail_drops() {
+    let fixture = numbered_host_fixture(50);
+    let state = fixture.state_dir();
+    assert!(run(&["up"], fixture.path(), &state).ok());
+
+    let full = run(&["logs", "noisy", "--full"], fixture.path(), &state);
+    assert!(full.ok(), "{}", full.combined());
+    assert!(
+        full.stdout.contains("line-1\n"),
+        "--full starts at the top:\n{}",
+        full.stdout
+    );
+
+    let tailed = run(&["logs", "noisy"], fixture.path(), &state);
+    assert!(!tailed.stdout.contains("line-1\n"), "{}", tailed.stdout);
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn logs_without_a_name_or_all_fails() {
+    let fixture = logging_host_fixture();
+    let state = fixture.state_dir();
+
+    let logs = run(&["logs"], fixture.path(), &state);
+    assert!(!logs.ok(), "logs with no service must fail");
+    assert!(logs.stderr.contains("logs --all"), "{}", logs.stderr);
+}
+
+#[test]
+fn logs_all_survives_a_service_that_never_started() {
+    let fixture = logging_host_fixture();
+    let state = fixture.state_dir();
+    assert!(run(&["up", "first"], fixture.path(), &state).ok());
+
+    let logs = run(&["logs", "--all"], fixture.path(), &state);
+    assert!(
+        logs.ok(),
+        "one missing log must not abort the view:\n{}",
+        logs.combined()
+    );
+    assert!(logs.stdout.contains("== first =="), "{}", logs.stdout);
+    assert!(logs.stdout.contains("== second =="), "{}", logs.stdout);
+    assert!(logs.stdout.contains("no log yet"), "{}", logs.stdout);
+
+    assert!(run(&["down"], fixture.path(), &state).ok());
+}
+
+#[test]
+fn logs_all_reaches_a_compose_project() {
+    let fixture = compose_fixture();
+    let docker_dir = fake_docker(&fixture);
+    let log = fixture.state_dir().join("docker.log");
+
+    let logs = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["logs", "--all"],
+    );
+    assert!(logs.ok(), "{}", logs.combined());
+    assert!(
+        logs.stdout.contains("== compose.yaml (project main) =="),
+        "{}",
+        logs.stdout
+    );
+    assert!(
+        call_count(
+            &log,
+            "logs --no-color --tail 40 db cache dependent init after-init"
+        ) == 1,
+        "one call per project, containers in manifest order: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+
+    let full = run_compose(
+        &fixture,
+        &docker_dir,
+        PS_ALL_UP,
+        COMPOSE_FAKE_CONFIG,
+        None,
+        false,
+        &["logs", "--all", "--full"],
+    );
+    assert!(full.ok(), "{}", full.combined());
+    assert!(
+        call_count(&log, "logs --no-color db cache dependent init after-init") == 1,
+        "--full drops the tail: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+#[test]
+fn logs_all_follow_prefixes_host_lines() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[[services]]
+id = "first"
+command = "sleep 1; echo first-live; sleep 300"
+port = { env = "PORT" }
+
+[[services]]
+id = "second"
+command = "sleep 1; echo second-live; sleep 300"
+port = { env = "PORT2" }
+"#,
+    );
+    fixture.git_repo();
+    let state = fixture.state_dir();
+    assert!(run(&["up"], fixture.path(), &state).ok());
+
+    let mut child = std::process::Command::new(support::bin())
+        .args(["logs", "--all", "-f"])
+        .current_dir(fixture.path())
+        .env("MAGICTREE_STATE_DIR", &state)
+        .env("MAGICTREE_CONFIG_DIR", state.join("config"))
+        .env("MAGICTREE_NO_UPDATE_CHECK", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn logs --all -f");
+
+    // Give both services time to write their line while following.
+    std::thread::sleep(Duration::from_secs(4));
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("collect follow output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("first | first-live"),
+        "host lines are attributed:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("second | second-live"),
+        "every host stream is followed:\n{stdout}"
     );
 
     assert!(run(&["down"], fixture.path(), &state).ok());

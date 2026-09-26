@@ -1,7 +1,7 @@
 use crate::banner;
 use crate::bootstrap;
 use crate::compose::{self, ComposeRunner, ContainerState};
-use crate::config::{BuildMode, Config};
+use crate::config::{BuildMode, Config, ReconcileMode};
 use crate::ctx::{runtime_dir_for, Ctx};
 use crate::discover;
 use crate::doctor;
@@ -9,8 +9,9 @@ use crate::dryrun;
 use crate::health;
 use crate::init;
 use crate::manifest::{self, Node, NodeKind, Runtime, Wait};
-use crate::paths::Paths;
+use crate::paths::{display_relative, Paths};
 use crate::ports;
+use crate::progress;
 use crate::repo::Repo;
 use crate::run;
 use crate::update;
@@ -224,6 +225,19 @@ pub struct UpArgs {
     /// cache check rather than a rebuild.
     #[arg(long, overrides_with = "build")]
     pub no_build: bool,
+    /// Reconcile Compose even for a project that is already up: start and
+    /// recreate it, and re-run one-shot initialisers. Without it, `up` leaves an
+    /// already-up project on an unchanged configuration alone. A build still
+    /// needs `--build`.
+    #[arg(long)]
+    pub refresh: bool,
+    /// Print only the step headers, failures and the final URL summary.
+    #[arg(long, short = 'q', overrides_with = "verbose")]
+    pub quiet: bool,
+    /// Stream each bootstrap command's output through magictree, indented under
+    /// its step, instead of letting the command write to the terminal itself.
+    #[arg(long, overrides_with = "quiet")]
+    pub verbose: bool,
     /// Which ports to use: `declared` takes each service's `prefer`, which is
     /// what the primary checkout's own tooling and generated files expect, so
     /// it is the default there; `generated` allocates every port from this
@@ -274,7 +288,17 @@ pub struct StatusArgs {
 
 #[derive(Args)]
 pub struct LogsArgs {
-    pub service: String,
+    /// Services to show (id or app:id). Defaults to the current app, or
+    /// everything at the workspace root when --all is given.
+    pub services: Vec<String>,
+    /// Show every service of the current scope, Compose projects included,
+    /// in the order `up` starts them.
+    #[arg(long, short = 'a')]
+    pub all: bool,
+    /// Print the whole log instead of the last --lines.
+    #[arg(long, conflicts_with = "lines")]
+    pub full: bool,
+    /// Follow new output. With --all, every stream is followed at once.
     #[arg(short, long)]
     pub follow: bool,
     #[arg(long, short = 'l', default_value_t = 40)]
@@ -810,7 +834,7 @@ fn cmd_new(args: NewArgs, dry_run: bool) -> Result<()> {
     let mut ctx = Ctx::load(&path)?;
     let selection = ctx.scope(&[], &[], false)?;
     let mode = ctx.config.build;
-    ensure(&mut ctx, &selection, None, mode).map(|_| ())
+    ensure(&mut ctx, &selection, None, mode, false, false, false, false).map(|_| ())
 }
 
 fn cmd_rm(args: RmArgs, dry_run: bool) -> Result<()> {
@@ -1091,7 +1115,30 @@ fn cmd_up(args: UpArgs, dry_run: bool) -> Result<()> {
     if dry_run {
         return dryrun::up(&ctx, &selection, args.ports, mode);
     }
-    ensure(&mut ctx, &selection, args.ports, mode).map(|_| ())
+    ensure(
+        &mut ctx,
+        &selection,
+        args.ports,
+        mode,
+        args.refresh,
+        args.build,
+        args.quiet,
+        args.verbose,
+    )
+    .map(|_| ())
+}
+
+/// A failed Compose start, plus the likeliest reason it failed when this run
+/// did not build: the image was never built.
+fn compose_start_error(reason: &str, build: bool) -> String {
+    if build {
+        reason.to_string()
+    } else {
+        format!(
+            "{reason}\n  this run did not build: `magictree up --build` builds the selected \
+             services' images"
+        )
+    }
 }
 
 /// The build decision for this run. The CLI wins over the configured mode, so
@@ -1204,6 +1251,85 @@ fn compose_group_end(
     Ok(end)
 }
 
+/// The steps `up` will execute, in order, so the counter can print a total
+/// before anything happens. Every operation is a step, including one that turns
+/// out to be a skip: the number follows the plan, not the work.
+fn plan_units(
+    ctx: &Ctx,
+    selection: &[usize],
+    assignment: &ports::Assignment,
+) -> Result<Vec<progress::Unit>> {
+    let mut units = Vec::new();
+    let targets = ctx.bootstrap_targets(selection);
+    for (dir, _app, steps) in &targets {
+        let phase = format!(
+            "bootstrap {}",
+            display_relative(&ctx.repo.worktree_root, dir)
+        );
+        if !steps.sync.is_empty() {
+            units.push(progress::Unit::new(
+                phase.clone(),
+                format!("sync {}", steps.sync.join(", ")),
+            ));
+        }
+        for step in &steps.run {
+            units.push(progress::Unit::new(phase.clone(), step.command()));
+        }
+    }
+
+    let mut position = 0;
+    while position < selection.len() {
+        let index = selection[position];
+        let node = &ctx.nodes[index];
+        match &node.kind {
+            NodeKind::Job(_) => {
+                units.push(progress::Unit::new("job", node.qual()));
+                position += 1;
+            }
+            NodeKind::Service(_) => match node.runtime() {
+                Some(Runtime::Compose) => {
+                    let key = ctx
+                        .runner_key(node)
+                        .ok_or_else(|| anyhow!("{}: missing compose reference", node.qual()))?;
+                    let env = ctx.node_env(node, assignment)?;
+                    let end = compose_group_end(ctx, selection, position, assignment, &env)?;
+                    let containers: Vec<String> = selection[position..end]
+                        .iter()
+                        .map(|&index| {
+                            ctx.nodes[index]
+                                .service()
+                                .and_then(|service| service.compose.as_ref())
+                                .map(|reference| reference.service.clone())
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    units.push(progress::Unit::new(
+                        format!(
+                            "compose {} (project {})",
+                            display_relative(&ctx.repo.worktree_root, &key.0),
+                            key.1
+                        ),
+                        containers.join(" "),
+                    ));
+                    position = end;
+                }
+                _ => {
+                    units.push(progress::Unit::new("service", node.qual()));
+                    position += 1;
+                }
+            },
+        }
+    }
+
+    for (dir, _app, steps) in &targets {
+        let phase = format!("after {}", display_relative(&ctx.repo.worktree_root, dir));
+        for step in &steps.after {
+            units.push(progress::Unit::new(phase.clone(), step.command()));
+        }
+    }
+    Ok(units)
+}
+
 /// The idempotent core: allocate ports, materialise env, bootstrap, then start
 /// services in dependency order, waiting for each to become healthy, and finish
 /// with the manifest's `after` steps.
@@ -1212,6 +1338,10 @@ fn ensure(
     selection: &[usize],
     requested: Option<ports::PortMode>,
     mode: BuildMode,
+    refresh: bool,
+    build_requested: bool,
+    quiet: bool,
+    verbose: bool,
 ) -> Result<ports::Assignment> {
     // Every service gets an assignment, not just the selected ones: a later
     // partial `up` still has to write an override for its dependencies, and a
@@ -1252,23 +1382,45 @@ fn ensure(
         format!("{}\n", serde_json::to_string_pretty(&assignment)?),
     )?;
 
-    for (dir, app, steps) in ctx.bootstrap_targets(selection) {
-        for message in bootstrap::sync_files(&ctx.repo, &ctx.repo.worktree_root, &dir, &steps.sync)?
-        {
-            println!("{message}");
+    let targets = ctx.bootstrap_targets(selection);
+    let sources: Vec<Option<bootstrap::Source>> = targets
+        .iter()
+        .map(|(dir, _, _)| {
+            if ctx.config.sync {
+                bootstrap::share_source(&ctx.repo, &ctx.paths, dir)
+            } else {
+                Ok(None)
+            }
+        })
+        .collect::<Result<_>>()?;
+    let mut progress = progress::Progress::new(plan_units(ctx, selection, &assignment)?, quiet);
+    for ((dir, app, steps), source) in targets.iter().zip(&sources) {
+        if !steps.sync.is_empty() {
+            let mut step = progress.step();
+            for message in bootstrap::sync_files(
+                &ctx.repo,
+                &ctx.repo.worktree_root,
+                dir,
+                steps,
+                source.as_ref(),
+                ctx.config.sync,
+            )? {
+                step.detail(&message);
+            }
         }
         if !steps.run.is_empty() {
             let env = ctx.build_env(app.as_deref(), &assignment)?;
-            for message in bootstrap::run_steps(
+            let _ = bootstrap::run_steps(
                 &ctx.runtime_dir,
-                &dir,
+                dir,
                 "bootstrap",
                 &steps.run,
                 &env.vars,
                 &bootstrap::prompt,
-            )? {
-                println!("{message}");
-            }
+                source.as_ref(),
+                verbose,
+                &mut progress,
+            )?;
         }
     }
 
@@ -1277,6 +1429,9 @@ fn ensure(
         compose::ensure_docker()?;
     }
     let build = compose_build(ctx, selection, &assignment, &runners, mode)?;
+
+    let mut record = compose::ComposeRecord::load(&ctx.runtime_dir);
+    let record_before = record.clone();
 
     let mut position = 0;
     while position < selection.len() {
@@ -1287,10 +1442,11 @@ fn ensure(
         let mut failure_node_index = index;
         let outcome = match &node.kind {
             NodeKind::Job(job) => {
-                println!("{}: running", node.qual());
-                match run::run_once(&job.run, &node.dir, &env) {
+                let mut step = progress.step();
+                step.detail(&format!("{}: running", node.qual()));
+                match run::run_once(&job.run, &node.dir, &env, verbose) {
                     Ok(()) => {
-                        println!("{}: done", node.qual());
+                        step.result("done");
                         Ok(None)
                     }
                     Err(error) => Err((None, format!("job failed: {error}"))),
@@ -1306,33 +1462,121 @@ fn ensure(
                         .ok_or_else(|| anyhow!("{}: no compose runner", node.qual()))?;
                     let batch_end = compose_group_end(ctx, selection, position, &assignment, &env)?;
                     consumed = batch_end - position;
+                    let mut step = progress.step();
+                    // Nothing is fetched under the shipped default: the alias
+                    // rewrite needs the configuration, and only reconcile =
+                    // "auto" needs it (and the container states) for the digest
+                    // and the skip decision below.
+                    let watch = ctx.config.reconcile == ReconcileMode::Auto;
+                    let config = if watch || runner.needs_config() {
+                        Some(runner.resolved_config(&env)?)
+                    } else {
+                        None
+                    };
+                    let states = if watch { runner.ps(&env)? } else { Vec::new() };
+                    let digest = config.as_deref().map(compose::digest);
+                    let entry = record.projects.get(&compose::project_key(runner)).cloned();
+                    let unchanged = entry
+                        .as_ref()
+                        .is_some_and(|entry| Some(entry.config.as_str()) == digest.as_deref());
+                    let reuse = entry.as_ref().and_then(|entry| entry.alias.clone());
+                    let skip_build = watch
+                        && !refresh
+                        && !build_requested
+                        && unchanged
+                        && compose::project_is_up(runner, &states);
+
                     let mut args = Vec::with_capacity(3 + consumed);
                     args.extend(["up", "-d"]);
                     if build {
                         args.push("--build");
                     }
                     let services_start = args.len();
+                    // A finished one-shot is left out of the start, unless every
+                    // selected service in this batch is one: Compose cannot be
+                    // invoked with no service.
+                    let mut finished: BTreeSet<usize> = BTreeSet::new();
+                    if watch && !refresh && unchanged && !skip_build {
+                        for &batch_index in &selection[position..batch_end] {
+                            let batch_node = &ctx.nodes[batch_index];
+                            let batch_service = batch_node.service().expect("compose service node");
+                            let container = batch_service
+                                .compose
+                                .as_ref()
+                                .expect("validated compose reference")
+                                .service
+                                .as_str();
+                            if batch_service.wait == Wait::Exit
+                                && states.iter().any(|state| {
+                                    state.service == container
+                                        && state.state.eq_ignore_ascii_case("exited")
+                                        && state.exit_code == Some(0)
+                                })
+                            {
+                                finished.insert(batch_index);
+                            }
+                        }
+                    }
+                    let skipped_indices = if finished.len() == consumed {
+                        BTreeSet::new()
+                    } else {
+                        finished
+                    };
                     for &batch_index in &selection[position..batch_end] {
                         let batch_node = &ctx.nodes[batch_index];
+                        if skipped_indices.contains(&batch_index) {
+                            step.detail(&format!(
+                                "{}: already finished, not re-run",
+                                batch_node.qual()
+                            ));
+                            continue;
+                        }
                         let container = batch_node
                             .service()
                             .and_then(|service| service.compose.as_ref())
                             .expect("validated compose reference")
                             .service
                             .as_str();
-                        println!("{}: starting container", batch_node.qual());
+                        step.detail(&format!("{}: starting container", batch_node.qual()));
                         args.push(container);
                     }
-                    let started = if consumed == 1 {
-                        runner.up_service(args[services_start], build, &env)
+                    let alias_name = if skip_build {
+                        reuse.clone()
                     } else {
-                        runner.up_services(&args, &env).map(|_| ())
+                        runner
+                            .alias_override(config.as_deref(), reuse.as_deref())?
+                            .and_then(|path| {
+                                path.file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                            })
+                            .or_else(|| reuse.clone())
+                    };
+                    if !skip_build {
+                        step.note("starting containers");
+                    }
+                    let started = if skip_build {
+                        Ok(())
+                    } else if consumed == 1 && args.len() > services_start {
+                        runner.up_service(
+                            args[services_start],
+                            build,
+                            &env,
+                            config.as_deref(),
+                            alias_name.as_deref(),
+                        )
+                    } else {
+                        runner
+                            .up_services(&args, &env, config.as_deref(), alias_name.as_deref())
+                            .map(|_| ())
                     };
                     if let Err(error) = started {
                         if consumed > 1 {
                             let services = args[services_start..].join(", ");
+                            let reason =
+                                format!("compose services [{services}] failed to start: {error}");
                             bail!(
-                                "compose services [{services}] failed to start: {error}\n  compose file {}\n  project {}\n  logs     docker compose -f {} -p {} logs {}",
+                                "{}\n  compose file {}\n  project {}\n  logs     docker compose -f {} -p {} logs {}",
+                                compose_start_error(&reason, build),
                                 runner.file.display(),
                                 runner.project,
                                 runner.file.display(),
@@ -1340,10 +1584,13 @@ fn ensure(
                                 args[services_start..].join(" ")
                             );
                         }
-                        Err((Some(runner), error.to_string()))
+                        Err((Some(runner), compose_start_error(&error.to_string(), build)))
                     } else {
                         let ready = (|| -> Result<()> {
                             for &batch_index in &selection[position..batch_end] {
+                                if skipped_indices.contains(&batch_index) {
+                                    continue;
+                                }
                                 failure_node_index = batch_index;
                                 let batch_node = &ctx.nodes[batch_index];
                                 let batch_service =
@@ -1357,35 +1604,60 @@ fn ensure(
                                 match batch_service.wait {
                                     // Compose owns dependency scheduling; magictree
                                     // still verifies one-shots before host dependants.
-                                    Wait::Exit => wait_for_exit(
-                                        runner,
-                                        container,
-                                        &env,
-                                        Duration::from_secs(initializer_timeout(ctx)),
-                                    ),
-                                    Wait::Running => wait_ready(
-                                        ctx,
-                                        batch_node,
-                                        &env,
-                                        &assignment,
-                                        Some((runner, container)),
-                                    ),
-                                }?;
+                                    Wait::Exit => {
+                                        wait_for_exit(
+                                            runner,
+                                            container,
+                                            &env,
+                                            Duration::from_secs(initializer_timeout(ctx)),
+                                        )?;
+                                        step.detail(&format!("{container}: exited 0"));
+                                    }
+                                    Wait::Running => {
+                                        wait_ready(
+                                            ctx,
+                                            batch_node,
+                                            &env,
+                                            &assignment,
+                                            Some((runner, container)),
+                                        )?;
+                                        step.detail(&format!("{container}: healthy"));
+                                    }
+                                }
                             }
                             Ok(())
                         })();
                         match ready {
-                            Ok(()) => Ok(Some(runner)),
+                            Ok(()) => {
+                                if let Some(digest) = &digest {
+                                    record.projects.insert(
+                                        compose::project_key(runner),
+                                        compose::ComposeEntry {
+                                            config: digest.clone(),
+                                            alias: alias_name.clone(),
+                                        },
+                                    );
+                                }
+                                if skip_build {
+                                    step.result(
+                                        "already up on an unchanged configuration, skipping build and start",
+                                    );
+                                } else {
+                                    step.result("started");
+                                }
+                                Ok(Some(runner))
+                            }
                             Err(error) => Err((Some(runner), error.to_string())),
                         }
                     }
                 }
                 _ => {
+                    let mut step = progress.step();
                     let alive = run::read_pid(&ctx.runtime_dir, &node.qual())
                         .map(run::is_alive)
                         .unwrap_or(false);
                     let started = if alive {
-                        println!("{}: already running", node.qual());
+                        step.detail(&format!("{}: already running", node.qual()));
                         Ok(())
                     } else {
                         match node.command() {
@@ -1397,7 +1669,7 @@ fn ensure(
                                 &env,
                             ) {
                                 Ok(pid) => {
-                                    println!("{}: started (pid {pid})", node.qual());
+                                    step.detail(&format!("{}: started (pid {pid})", node.qual()));
                                     Ok(())
                                 }
                                 Err(error) => Err(error),
@@ -1405,8 +1677,12 @@ fn ensure(
                             None => Err(anyhow!("no command or target")),
                         }
                     };
+                    step.note("waiting for health");
                     match started.and_then(|()| wait_ready(ctx, node, &env, &assignment, None)) {
-                        Ok(()) => Ok(None),
+                        Ok(()) => {
+                            step.result("healthy");
+                            Ok(None)
+                        }
                         Err(error) => Err((None, error.to_string())),
                     }
                 }
@@ -1421,28 +1697,34 @@ fn ensure(
         position += consumed;
     }
 
+    if record != record_before {
+        record.save(&ctx.runtime_dir)?;
+    }
+
     print_summary(ctx, selection, &assignment);
 
     // `after` steps run once every selected service is healthy and every `up`
     // job has finished. They come last so a failure still leaves the URLs on
     // screen: the stack is up, and the failing script is the only thing wrong.
-    for (dir, app, steps) in ctx.bootstrap_targets(selection) {
+    for ((dir, app, steps), source) in targets.iter().zip(&sources) {
         if steps.after.is_empty() {
             continue;
         }
         let env = ctx.build_env(app.as_deref(), &assignment)?;
-        for message in bootstrap::run_steps(
+        let _ = bootstrap::run_steps(
             &ctx.runtime_dir,
-            &dir,
+            dir,
             "after",
             &steps.after,
             &env.vars,
             &bootstrap::prompt,
-        )? {
-            println!("{message}");
-        }
+            source.as_ref(),
+            verbose,
+            &mut progress,
+        )?;
     }
 
+    progress.finish();
     Ok(assignment)
 }
 
@@ -1665,7 +1947,8 @@ fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
                         runner.stop_service(&container, &env)?;
                     }
                     println!("{}: starting container", node.qual());
-                    runner.up_service(&container, build, &env)?;
+                    let config = runner.resolved_config(&env)?;
+                    runner.up_service(&container, build, &env, Some(&config), None)?;
                     match service.wait {
                         Wait::Exit => wait_for_exit(
                             runner,
@@ -1817,47 +2100,234 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
     Ok(())
 }
 
+/// A section of `logs`: one Compose project, or one host service.
+enum LogSection {
+    Compose {
+        runner: ComposeRunner,
+        containers: Vec<String>,
+    },
+    Host {
+        qual: String,
+    },
+}
+
+/// The services `logs` was asked for, in the order `up` starts them. No
+/// dependency closure: asking for one service's output must not drag in its
+/// database.
+fn logs_selection(ctx: &Ctx, args: &LogsArgs) -> Result<Vec<usize>> {
+    if !args.services.is_empty() {
+        let mut chosen = Vec::new();
+        for name in &args.services {
+            let node = ctx
+                .find_node(name)
+                .ok_or_else(|| anyhow!("unknown service '{name}'"))?;
+            let index = ctx
+                .nodes
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, node))
+                .expect("found node is in the list");
+            chosen.push(index);
+        }
+        if args.all {
+            // The names win for the projects they touch; everything else in
+            // scope is added, and one dependency order covers them all.
+            let mut all = ctx.scope(&[], &[], false)?;
+            for index in chosen {
+                if !all.contains(&index) {
+                    all.push(index);
+                }
+            }
+            return manifest::order_selected(&ctx.nodes, &ctx.edges, &all);
+        }
+        return manifest::order_selected(&ctx.nodes, &ctx.edges, &chosen);
+    }
+    if args.all {
+        return ctx.scope(&[], &[], false);
+    }
+    bail!("name a service, or use `logs --all`")
+}
+
+/// One section per Compose project and one per host service, in start order.
+fn logs_sections(ctx: &Ctx, selection: &[usize]) -> Result<Vec<LogSection>> {
+    let mut sections: Vec<LogSection> = Vec::new();
+    for &index in selection {
+        let node = &ctx.nodes[index];
+        if node.runtime() == Some(Runtime::Compose) {
+            let key = ctx
+                .runner_key(node)
+                .ok_or_else(|| anyhow!("{}: missing compose reference", node.qual()))?;
+            let container = node
+                .service()
+                .and_then(|service| service.compose.as_ref())
+                .expect("validated compose reference")
+                .service
+                .clone();
+            if let Some(LogSection::Compose { runner, containers }) = sections.last_mut() {
+                if runner.file == key.0 && runner.project == key.1 {
+                    containers.push(container);
+                    continue;
+                }
+            }
+            sections.push(LogSection::Compose {
+                runner: ComposeRunner::new(key.0, None, key.1),
+                containers: vec![container],
+            });
+        } else {
+            sections.push(LogSection::Host { qual: node.qual() });
+        }
+    }
+    Ok(sections)
+}
+
 fn cmd_logs(args: LogsArgs) -> Result<()> {
-    let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
-    let node = ctx
-        .find_node(&args.service)
-        .ok_or_else(|| anyhow!("unknown service '{}'", args.service))?;
-    let path = run::log_file(&ctx.runtime_dir, &node.qual());
-    if !path.exists() {
-        bail!("no log file yet at {}", path.display());
-    }
-    let mut file = File::open(&path)?;
-    let length = file.metadata()?.len();
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(args.lines);
-    for line in &lines[start..] {
-        println!("{line}");
-    }
+    let ctx = Ctx::load(&resolve_cwd(args.cwd.clone())?)?;
+    let selection = logs_selection(&ctx, &args)?;
+    let sections = logs_sections(&ctx, &selection)?;
+    let single = sections.len() == 1;
+
     if args.follow {
-        follow(&path, length)?;
+        let mut children = Vec::new();
+        let mut threads = Vec::new();
+        for section in &sections {
+            match section {
+                LogSection::Compose { runner, containers } => {
+                    let mut command = std::process::Command::new("docker");
+                    command
+                        .arg("compose")
+                        .arg("-f")
+                        .arg(&runner.file)
+                        .arg("-p")
+                        .arg(&runner.project)
+                        .args(["logs", "-f", "--no-color"])
+                        .args(containers)
+                        .stdout(std::process::Stdio::inherit())
+                        .stderr(std::process::Stdio::inherit());
+                    match command.spawn() {
+                        Ok(child) => children.push(child),
+                        Err(error) => {
+                            if single {
+                                return Err(error).context("running docker compose logs");
+                            }
+                            eprintln!("docker compose logs failed: {error}");
+                        }
+                    }
+                }
+                LogSection::Host { qual } => {
+                    let path = run::log_file(&ctx.runtime_dir, qual);
+                    if !path.exists() {
+                        if single {
+                            bail!("no log file yet at {}", path.display());
+                        }
+                        println!("     no log yet (the service has not been started)");
+                        continue;
+                    }
+                    let offset = if args.full {
+                        0
+                    } else {
+                        std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+                    };
+                    let qual = qual.clone();
+                    threads.push(std::thread::spawn(move || {
+                        follow_host(&path, offset, &qual)
+                    }));
+                }
+            }
+        }
+        for mut child in children {
+            let _ = child.wait();
+        }
+        for thread in threads {
+            let _ = thread.join();
+        }
+        return Ok(());
+    }
+
+    for section in &sections {
+        match section {
+            LogSection::Compose { runner, containers } => {
+                println!(
+                    "== {} (project {}) ==",
+                    display_relative(&ctx.repo.worktree_root, &runner.file),
+                    runner.project
+                );
+                let tail = args.lines.to_string();
+                let mut arguments = vec!["logs", "--no-color"];
+                if !args.full {
+                    arguments.push("--tail");
+                    arguments.push(&tail);
+                }
+                arguments.extend(containers.iter().map(String::as_str));
+                match runner.run(&arguments, &BTreeMap::new()) {
+                    Ok(output) => print!("{}", String::from_utf8_lossy(&output.stdout)),
+                    Err(error) => {
+                        if single {
+                            return Err(error);
+                        }
+                        println!("{error}");
+                    }
+                }
+            }
+            LogSection::Host { qual } => {
+                if !single {
+                    println!("== {qual} ==");
+                }
+                let path = run::log_file(&ctx.runtime_dir, qual);
+                if !path.exists() {
+                    if single {
+                        bail!("no log file yet at {}", path.display());
+                    }
+                    println!("     no log yet (the service has not been started)");
+                    continue;
+                }
+                let content = std::fs::read_to_string(&path)?;
+                let lines: Vec<&str> = content.lines().collect();
+                let slice = if args.full {
+                    &lines[..]
+                } else {
+                    let start = lines.len().saturating_sub(args.lines);
+                    &lines[start..]
+                };
+                for line in slice {
+                    println!("{line}");
+                }
+            }
+        }
     }
     Ok(())
 }
 
-fn follow(path: &Path, mut offset: u64) -> Result<()> {
+/// Tail a host service's log file, prefixing each line with its name so an
+/// interleaved view can attribute it. A partial last line stays buffered, so a
+/// read boundary never splits one.
+fn follow_host(path: &Path, mut offset: u64, qual: &str) {
+    let mut partial = String::new();
     loop {
         sleep(Duration::from_millis(300));
-        let mut file = File::open(path)?;
-        let length = file.metadata()?.len();
+        let Ok(mut file) = File::open(path) else {
+            continue;
+        };
+        let length = file.metadata().map(|meta| meta.len()).unwrap_or(0);
         if length < offset {
             // Truncated or rotated (`up` truncates the log on every start):
             // restart from the top instead of waiting for the file to regrow.
             offset = 0;
+            partial.clear();
         }
         if length > offset {
-            file.seek(SeekFrom::Start(offset))?;
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                continue;
+            }
             let mut buffer = String::new();
-            file.read_to_string(&mut buffer)?;
-            print!("{buffer}");
-            std::io::stdout().flush()?;
+            if file.read_to_string(&mut buffer).is_err() {
+                continue;
+            }
             offset = length;
+            partial.push_str(&buffer);
+            while let Some(newline) = partial.find('\n') {
+                let line: String = partial.drain(..=newline).collect();
+                println!("{qual} | {}", &line[..line.len() - 1]);
+            }
+            let _ = std::io::stdout().flush();
         }
     }
 }

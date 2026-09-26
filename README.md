@@ -126,8 +126,9 @@ the build *is* the check: an unchanged context is a cache hit, not a rebuild.
 
 `build` in `~/.config/magictree/config.toml` decides whether that happens: `"always"` (the
 default), `"ask"` — one question per run, naming the services that would build, declined when
-there is no terminal — or `"never"`. `--build` and `--no-build` override it for one run. A
-service that only names an `image:` is never built and never asked about.
+there is no terminal — or `"never"`, which is how a machine says "build only when I ask". In
+that case `magictree up --build` builds for one run. A service that only names an `image:` is
+never built and never asked about.
 
 ## Commands
 
@@ -135,7 +136,7 @@ service that only names an `image:` is never built and never asked about.
 |---|---|
 | `discover`, `init`, `doctor` | read the repository, write manifests, detect drift |
 | `up`, `down`, `restart`, `status` | start, stop, restart specific services, inspect a worktree's stack |
-| `logs`, `env`, `ports` | service output, resolved environment, port assignment |
+| `logs`, `env`, `ports` | service output (one service, or `--all` for the whole stack, Compose included), resolved environment, port assignment |
 | `exec` | run a command with this worktree's resolved environment |
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |
 | `completion` | a shell completion script, printed to stdout |
@@ -445,6 +446,8 @@ so the file itself is optional.
 | `stop_timeout_secs` | `10` | Grace period after SIGTERM before a host process is killed. |
 | `health_timeout_secs` | `60` | Default health-probe timeout, in seconds. |
 | `build` | `"always"` | Whether `up` and `restart` build the compose services they start: `"always"`, `"ask"`, or `"never"`. `--build` and `--no-build` override it for one run. |
+| `reconcile` | `"always"` | Whether `up` reconciles an already-up Compose project every time (`"always"`, the default and today's behaviour), or leaves it alone on an unchanged configuration (`"auto"`). `up --refresh` forces a reconcile for one run. |
+| `sync` | `true` | Whether `[bootstrap] sync` may link a path from the primary checkout; `false` makes every checkout install its own dependencies. |
 | `check_for_updates` | `true` | Whether a command may end by naming a release that has landed since this binary was installed. |
 
 ## Layout

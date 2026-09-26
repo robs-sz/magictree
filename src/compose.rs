@@ -1,10 +1,86 @@
 use crate::manifest::Expose;
 use crate::slug::short_hash;
 use anyhow::{anyhow, bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// What each Compose project was last started with, so a repeat `up` can tell
+/// whether Compose would change anything. Written to `<runtime_dir>/compose.json`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeRecord {
+    #[serde(default)]
+    pub projects: BTreeMap<String, ComposeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComposeEntry {
+    /// Digest of the rendered configuration this project was started with.
+    pub config: String,
+    /// Name of the browser-alias override file written for that configuration.
+    #[serde(default)]
+    pub alias: Option<String>,
+}
+
+impl ComposeRecord {
+    /// Read the record, defaulting on any failure: a missing or unreadable file
+    /// is the state a version without this file leaves, not an error.
+    pub fn load(runtime_dir: &Path) -> Self {
+        std::fs::read_to_string(runtime_dir.join("compose.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, runtime_dir: &Path) -> Result<()> {
+        let path = runtime_dir.join("compose.json");
+        let payload = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, format!("{payload}\n"))
+            .with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+/// The record's key for one project: the compose file plus the project name,
+/// matching how `Ctx::runner_key` identifies a runner.
+pub fn project_key(runner: &ComposeRunner) -> String {
+    format!("{}|{}", runner.file.display(), runner.project)
+}
+
+/// `docker compose config --format json`: one deterministic document per
+/// project, the single input to the browser-alias rewrite, the build question
+/// and the digest that decides whether Compose would change anything.
+pub fn digest(raw: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Whether every service this runner owns is up: running and healthy (or with
+/// no health check), or an initialiser that exited zero. A missing entry is
+/// not up.
+pub fn project_is_up(runner: &ComposeRunner, states: &[ContainerState]) -> bool {
+    runner.services.iter().all(|name| {
+        states
+            .iter()
+            .find(|entry| &entry.service == name)
+            .is_some_and(|entry| {
+                if entry.state.eq_ignore_ascii_case("running") {
+                    entry
+                        .health
+                        .as_deref()
+                        .map(|health| health.is_empty() || health.eq_ignore_ascii_case("healthy"))
+                        .unwrap_or(true)
+                } else if entry.state.eq_ignore_ascii_case("exited") {
+                    entry.exit_code == Some(0)
+                } else {
+                    false
+                }
+            })
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct PortMapping {
@@ -49,6 +125,9 @@ pub struct ComposeRunner {
     pub file: PathBuf,
     pub override_file: Option<PathBuf>,
     pub project: String,
+    /// The container names this runner is responsible for, in manifest order.
+    /// A repeat `up` checks these before deciding a project is already up.
+    pub services: Vec<String>,
     /// Selected localhost URLs to rewrite when Compose launches services.
     pub browser_aliases: BTreeMap<u16, String>,
     /// Compose services whose environment may carry an alias, by Compose
@@ -67,6 +146,7 @@ impl ComposeRunner {
             file,
             override_file,
             project,
+            services: Vec::new(),
             browser_aliases: BTreeMap::new(),
             browser_alias_services: BTreeSet::new(),
         }
@@ -122,23 +202,41 @@ impl ComposeRunner {
         Ok(output)
     }
 
-    fn run_up(
-        &self,
-        args: &[&str],
-        env: &BTreeMap<String, String>,
-    ) -> Result<std::process::Output> {
-        let Some(alias_override) = self.url_alias_override(env)? else {
-            return self.run(args, env);
-        };
-        self.run_with_extra_override(args, env, Some(&alias_override))
+    /// Whether this runner needs the resolved configuration: only a runner with
+    /// browser aliases does, and only then does `up` pay for `config`.
+    pub fn needs_config(&self) -> bool {
+        !self.browser_aliases.is_empty()
     }
 
-    fn url_alias_override(&self, env: &BTreeMap<String, String>) -> Result<Option<PathBuf>> {
+    /// The rendered configuration for this project, one deterministic document
+    /// (`docker compose config --format json`).
+    pub fn resolved_config(&self, env: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+        let output = self.run(&["config", "--format", "json"], env)?;
+        Ok(output.stdout)
+    }
+
+    /// The browser-alias override for a configuration, reusing a previously
+    /// written file by name when it still exists.
+    pub fn alias_override(
+        &self,
+        config: Option<&[u8]>,
+        reuse: Option<&str>,
+    ) -> Result<Option<PathBuf>> {
         if self.browser_aliases.is_empty() {
             return Ok(None);
         }
-        let output = self.run(&["config", "--format", "json"], env)?;
-        let config: Value = serde_json::from_slice(&output.stdout)
+        if let Some(name) = reuse {
+            if let Some(parent) = self.override_file.as_ref().and_then(|path| path.parent()) {
+                let candidate = parent.join(name);
+                if candidate.exists() {
+                    return Ok(Some(candidate));
+                }
+            }
+        }
+        let Some(config) = config else {
+            return Ok(None);
+        };
+        let config: Value = serde_json::from_slice(config)
             .context("parsing docker compose config for browser URL aliases")?;
         let mut replacements: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         if let Some(services) = config.get("services").and_then(Value::as_object) {
@@ -207,26 +305,36 @@ impl ComposeRunner {
     /// service's image first, which is how a changed Dockerfile or build
     /// context reaches the container: Compose validates its cache, so an image
     /// whose inputs are unchanged costs a cache check rather than a rebuild.
+    ///
+    /// `config` is the resolved configuration when the caller already has it
+    /// (a browser-alias rewrite or a reconciliation decision needs it); with
+    /// `None` and no aliases, nothing is fetched.
     pub fn up_service(
         &self,
         service: &str,
         build: bool,
         env: &BTreeMap<String, String>,
+        config: Option<&[u8]>,
+        reuse_alias: Option<&str>,
     ) -> Result<()> {
         let args = if build {
             vec!["up", "-d", "--build", service]
         } else {
             vec!["up", "-d", service]
         };
-        self.run_up(&args, env).map(|_| ())
+        self.up_services(&args, env, config, reuse_alias)
+            .map(|_| ())
     }
 
     pub fn up_services(
         &self,
         args: &[&str],
         env: &BTreeMap<String, String>,
+        config: Option<&[u8]>,
+        reuse_alias: Option<&str>,
     ) -> Result<std::process::Output> {
-        self.run_up(args, env)
+        let alias = self.alias_override(config, reuse_alias)?;
+        self.run_with_extra_override(args, env, alias.as_deref())
     }
 
     /// Stop one service's containers, keeping them: the next `up -d` starts

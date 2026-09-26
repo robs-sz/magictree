@@ -93,6 +93,7 @@ magictree up --no-build # skip the image build for a stack already built
 magictree status        # what is running, on which port
 magictree ports         # the port assignment as URLs
 magictree logs web -f   # follow one service's output
+magictree logs --all     # every service's output, Compose projects included
 magictree restart web   # stop one service and start it again (rebuilds its image); deps untouched
 magictree down          # stop everything, keep volumes
 ```
@@ -107,8 +108,14 @@ everything stays running so it can be inspected.
 build context is picked up; Compose validates its cache, so an unchanged context is a cache
 hit rather than a rebuild. `build` in `~/.config/magictree/config.toml` sets the default —
 `"always"` (the default), `"ask"` (one question per run, naming the services that would
-build, declined without a terminal), or `"never"` — and `--build`/`--no-build` override it for
-one run. A service that only names an `image:` is never built and never asked about.
+build, declined without a terminal), or `"never"` (build only when asked) — and
+`--build`/`--no-build` override it for one run. A service that only names an `image:` is never
+built and never asked about.
+
+With `reconcile = "auto"` in `~/.config/magictree/config.toml` — not the default — `up`
+leaves an already-up Compose project on an unchanged configuration alone: no start, no
+recreate, no one-shot initialiser re-run, and no build. `up --refresh` forces a full
+reconcile for one run.
 
 In the primary checkout `up` uses the ports the manifest declares with `prefer`, because the
 repository's own tooling and the files it generates were written against them. A linked
@@ -264,10 +271,14 @@ Rules that matter:
   exposes. `expose = "none"` publishes nothing.
 - Several ports on one service use `ports = [ { name = "api", target = 9000 }, ... ]`.
   A single `port = {...}` keeps the plain name; multiple ports are named.
-- Bootstrap steps with `inputs` are skipped when those files are unchanged. An app
-  manifest's `sync` paths and `inputs` are relative to that manifest's own directory, the
-  same directory its commands run in: `inputs = ["uv.lock"]` in `api/magictree.toml` means
-  `api/uv.lock`. Only a root manifest's paths are relative to the repository root.
+- Bootstrap steps with `inputs` are skipped when those files are unchanged, and an
+  `outputs` list makes a step run when a declared artefact is missing. An app
+  manifest's `sync` paths, `inputs` and `outputs` are relative to that manifest's own
+  directory, the same directory its commands run in: `inputs = ["uv.lock"]` in
+  `api/magictree.toml` means `api/uv.lock`. Only a root manifest's paths are relative to
+  the repository root. An output that `sync` links from the primary checkout is trusted
+  only while its `inputs` still match the primary checkout's, so a branch with a
+  different lockfile installs its own copy.
 - `[jobs.<id>]` with `when = "up"` runs once after its `needs` are healthy; `when = "manual"`
   never runs automatically. A script that needs the whole stack (seed, smoke test, browser)
   belongs in `[bootstrap] after`, which runs once every selected service is healthy:
@@ -308,9 +319,11 @@ Common causes:
   If a *declared* port is already in use, another stack owns it (the repository's own start
   script, most likely): stop that one, or run `magictree up --ports generated` to put this
   checkout on its block ports instead.
-- **A container exited.** `magictree logs` only covers host processes; the failure report
-  prints the exact `docker compose -p <project> logs <service>` command to use instead. A
-  one-shot initialiser that exits zero is treated as finished, not failed.
+- **A container exited.** `magictree logs <service>` shows a container's output too, and
+  `magictree logs --all` shows the whole stack — Compose projects included — in the order `up`
+  starts them (`--full` for the whole log, `-f` to follow). The failure report prints the
+  exact `docker compose -p <project> logs <service>` command as well. A one-shot initialiser
+  that exits zero is treated as finished, not failed.
 - **A build is slow or unwanted.** `up` and `restart` build the compose services they start,
   which is how a changed Dockerfile or build context is picked up. There is no cheaper check
   to ask Docker for, so the build is the check: an unchanged context is a cache hit. Pass

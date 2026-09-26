@@ -19,6 +19,7 @@ pub mod init;
 pub mod manifest;
 pub mod paths;
 pub mod ports;
+pub mod progress;
 pub mod repo;
 pub mod run;
 pub mod slug;

@@ -849,6 +849,32 @@ pub fn install_inputs(app_root: &Path) -> Vec<String> {
     inputs
 }
 
+/// The directory an install creates, as the mirror of `install_command`: the
+/// one artefact whose absence has to re-run the install even when the
+/// lockfiles are unchanged. The order mirrors `install_command`, so the two
+/// agree.
+pub fn install_outputs(app_root: &Path) -> Option<String> {
+    let has = |name: &str| app_root.join(name).is_file();
+    for lock in [
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "bun.lock",
+        "package-lock.json",
+        "package.json",
+    ] {
+        if has(lock) {
+            return Some("node_modules".to_string());
+        }
+    }
+    for lock in ["uv.lock", "poetry.lock", "pyproject.toml"] {
+        if has(lock) {
+            return Some(".venv".to_string());
+        }
+    }
+    None
+}
+
 fn derive_unknowns(root: &Path, apps: &[AppFacts], facts: &[Fact]) -> Vec<Unknown> {
     let mut unknowns = Vec::new();
 

@@ -77,7 +77,7 @@ pub fn wait_for_command(
     timeout: Duration,
 ) -> Result<()> {
     poll(
-        || run::run_once(command, cwd, env).is_ok(),
+        || run::run_once(command, cwd, env, false).is_ok(),
         timeout,
         &format!("`{command}`"),
         None,

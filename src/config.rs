@@ -24,6 +24,20 @@ impl Default for BuildMode {
     }
 }
 
+/// What `up` does with a Compose project that is already up on an unchanged
+/// configuration. `Always` (the default, and what `up` has always done)
+/// reconciles it every time; `Auto` skips the start, the recreate and a
+/// finished one-shot's re-run, which is the opt-in through
+/// ~/.config/magictree/config.toml. `up --refresh` forces a reconcile for one
+/// run either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReconcileMode {
+    #[default]
+    Always,
+    Auto,
+}
+
 /// Optional machine-wide configuration at ~/.config/magictree/config.toml.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -40,6 +54,13 @@ pub struct Config {
     pub health_timeout_secs: u64,
     /// Whether `up` and `restart` build the compose services they start.
     pub build: BuildMode,
+    /// What `up` does with a Compose project that is already up on an unchanged
+    /// configuration.
+    pub reconcile: ReconcileMode,
+    /// Whether `[bootstrap] sync` may link a path from the primary checkout.
+    /// `true` (the default) honours the manifest; `false` makes every checkout
+    /// install its own dependencies, and unlinks anything a previous run linked.
+    pub sync: bool,
     /// Whether a command may mention a release that has landed since this
     /// binary was installed.
     pub check_for_updates: bool,
@@ -54,6 +75,8 @@ impl Default for Config {
             stop_timeout_secs: 10,
             health_timeout_secs: 60,
             build: BuildMode::default(),
+            reconcile: ReconcileMode::default(),
+            sync: true,
             check_for_updates: true,
         }
     }
@@ -111,5 +134,18 @@ mod tests {
         let config: Config = toml::from_str(r#"build = "ask""#).expect("parse");
         assert_eq!(config.build, BuildMode::Ask);
         assert!(toml::from_str::<Config>(r#"build = "sometimes""#).is_err());
+    }
+
+    #[test]
+    fn a_config_without_a_reconcile_key_always_reconciles() {
+        let config: Config = toml::from_str("port_stride = 10").expect("parse");
+        assert_eq!(config.reconcile, ReconcileMode::Always);
+    }
+
+    #[test]
+    fn a_reconcile_mode_is_named_in_lowercase() {
+        let config: Config = toml::from_str(r#"reconcile = "auto""#).expect("parse");
+        assert_eq!(config.reconcile, ReconcileMode::Auto);
+        assert!(toml::from_str::<Config>(r#"reconcile = "sometimes""#).is_err());
     }
 }

@@ -7,7 +7,9 @@
 
 pub mod wizard;
 
-use crate::discover::extractors::{install_command, install_inputs, parse_port_mapping};
+use crate::discover::extractors::{
+    install_command, install_inputs, install_outputs, parse_port_mapping,
+};
 use crate::discover::ports;
 use crate::discover::report::*;
 use anyhow::{bail, Context, Result};
@@ -1051,6 +1053,7 @@ pub fn warnings(report: &Report, answers: &AnswerSet) -> Vec<String> {
 fn bootstrap_section(app_root: &Path, setup: &[String]) -> Result<Option<String>> {
     let install = install_command(app_root);
     let inputs = install_inputs(app_root);
+    let outputs = install_outputs(app_root);
     if install.is_none() && setup.is_empty() {
         return Ok(None);
     }
@@ -1059,9 +1062,13 @@ fn bootstrap_section(app_root: &Path, setup: &[String]) -> Result<Option<String>
     if let Some(command) = &install {
         if !inputs.is_empty() {
             let quoted: Vec<String> = inputs.iter().map(|input| format!("\"{input}\"")).collect();
+            let outputs_part = match &outputs {
+                Some(output) => format!(", outputs = [\"{output}\"]"),
+                None => String::new(),
+            };
             let _ = writeln!(
                 out,
-                "  {{ command = \"{command}\", inputs = [{}] }},",
+                "  {{ command = \"{command}\", inputs = [{}]{outputs_part} }},",
                 quoted.join(", ")
             );
         } else {

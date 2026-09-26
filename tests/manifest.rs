@@ -573,3 +573,61 @@ port = { env = "PORT" }
     assert_eq!(after[2].inputs(), ["input.txt".to_string()]);
     assert!(after[2].asks());
 }
+
+#[test]
+fn an_unknown_key_in_a_step_is_ignored() {
+    // An older binary reading a newer manifest must not choke on a key it does
+    // not know: no `deny_unknown_fields`, so extra keys are simply ignored.
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[bootstrap]
+run = [{ command = "echo hi", inputs = ["x"], future_key = 1 }]
+
+[[services]]
+id = "app"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let loaded = Loaded::load(fixture.path()).expect("load");
+    let step = &loaded.workspace.bootstrap.run[0];
+    assert_eq!(step.command(), "echo hi");
+    assert_eq!(step.inputs(), ["x".to_string()]);
+    assert!(step.outputs().is_empty());
+}
+
+#[test]
+fn an_old_shaped_manifest_still_parses() {
+    // Bare-string steps, `sync`, `inputs` and `ask` only: the shape a manifest
+    // written before this change has, with none of the new fields.
+    let fixture = Fixture::new();
+    fixture.write(
+        "magictree.toml",
+        r#"
+version = 1
+
+[bootstrap]
+sync = ["node_modules"]
+run = ["pnpm install", { command = "just generate", inputs = ["lock"] }]
+after = [{ command = "just seed", ask = true }]
+
+[[services]]
+id = "web"
+command = "sleep 300"
+port = { env = "PORT" }
+"#,
+    );
+    fixture.git_repo();
+    let loaded = Loaded::load(fixture.path()).expect("load");
+    let bootstrap = &loaded.workspace.bootstrap;
+    assert_eq!(bootstrap.sync, ["node_modules".to_string()]);
+    assert_eq!(bootstrap.run[0].command(), "pnpm install");
+    assert!(bootstrap.run[0].outputs().is_empty());
+    assert_eq!(bootstrap.run[1].inputs(), ["lock".to_string()]);
+    assert!(bootstrap.after[0].asks());
+}

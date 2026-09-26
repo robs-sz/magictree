@@ -63,6 +63,13 @@ pub enum RunStep {
         command: String,
         #[serde(default)]
         inputs: Vec<String>,
+        /// Artefacts the step produces, relative to the manifest that declares
+        /// them — the mirror of `inputs`. A declared output that is missing is the
+        /// one reason not to trust a cached step, and an output `[bootstrap] sync`
+        /// linked from the primary checkout is only trusted while that link still
+        /// matches the step's `inputs`.
+        #[serde(default)]
+        outputs: Vec<String>,
         /// Ask before running: `up` prints `Run task: <command> (y/N)` and
         /// runs the step only on a yes. A run without a terminal — scripts,
         /// agents, CI — always declines, so nothing unattended is run.
@@ -83,6 +90,13 @@ impl RunStep {
         match self {
             RunStep::Simple(_) => &[],
             RunStep::Detailed { inputs, .. } => inputs,
+        }
+    }
+
+    pub fn outputs(&self) -> &[String] {
+        match self {
+            RunStep::Simple(_) => &[],
+            RunStep::Detailed { outputs, .. } => outputs,
         }
     }
 

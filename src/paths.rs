@@ -91,3 +91,18 @@ fn home() -> Result<PathBuf> {
         .map(PathBuf::from)
         .context("HOME is not set")
 }
+
+/// A path shown relative to a root, so a plan reads `api/magictree.toml`
+/// rather than an absolute path.
+pub fn display_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|value| {
+            let text = value.display().to_string();
+            if text.is_empty() {
+                ".".to_string()
+            } else {
+                text
+            }
+        })
+        .unwrap_or_else(|_| path.display().to_string())
+}

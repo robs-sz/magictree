@@ -538,7 +538,7 @@ impl Ctx {
         for group in &groups {
             let override_file = compose::write_override(&self.runtime_dir, group)?;
             let key = (group.file.clone(), group.project.clone());
-            let runner = ComposeRunner::new(
+            let mut runner = ComposeRunner::new(
                 group.file.clone(),
                 Some(override_file),
                 group.project.clone(),
@@ -547,6 +547,11 @@ impl Ctx {
                 self.browser_url_aliases(assignment),
                 browser_services(group),
             );
+            runner.services = group
+                .services
+                .iter()
+                .map(|service| service.name.clone())
+                .collect();
             runners.insert(key, runner);
         }
         Ok(runners)

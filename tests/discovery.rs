@@ -560,3 +560,39 @@ fn asks_nothing_about_storybook_without_the_tool() {
         "the app must not be asked about a tool it does not use"
     );
 }
+
+#[test]
+fn install_outputs_follows_the_install_command() {
+    use magictree::discover::extractors::{install_command, install_outputs};
+
+    let pnpm = Fixture::new();
+    pnpm.write("pnpm-lock.yaml", "lockfileVersion: 9\n");
+    assert_eq!(
+        install_command(pnpm.path()).as_deref(),
+        Some("pnpm install")
+    );
+    assert_eq!(
+        install_outputs(pnpm.path()).as_deref(),
+        Some("node_modules")
+    );
+
+    let uv = Fixture::new();
+    uv.write("uv.lock", "version = 1\n");
+    assert_eq!(
+        install_command(uv.path()).as_deref(),
+        Some("uv sync --group dev")
+    );
+    assert_eq!(install_outputs(uv.path()).as_deref(), Some(".venv"));
+
+    let pyproject = Fixture::new();
+    pyproject.write("pyproject.toml", "[project]\nname = \"x\"\n");
+    assert_eq!(
+        install_command(pyproject.path()).as_deref(),
+        Some("uv sync")
+    );
+    assert_eq!(install_outputs(pyproject.path()).as_deref(), Some(".venv"));
+
+    let none = Fixture::new();
+    assert_eq!(install_command(none.path()), None);
+    assert_eq!(install_outputs(none.path()), None);
+}

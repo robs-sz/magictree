@@ -1,7 +1,9 @@
 use crate::config::BuildMode;
 use crate::ctx::Ctx;
 use crate::manifest::{Expose, NodeKind, RunStep, Runtime};
+use crate::paths::display_relative;
 use crate::ports;
+use crate::progress;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -83,38 +85,6 @@ pub fn up(
     }
 
     let targets = ctx.bootstrap_targets(selection);
-    if targets
-        .iter()
-        .any(|(_, _, steps)| !steps.sync.is_empty() || !steps.run.is_empty())
-    {
-        println!("\n# bootstrap");
-    }
-    for (dir, _app, steps) in &targets {
-        if steps.sync.is_empty() && steps.run.is_empty() {
-            continue;
-        }
-        println!("({})", display_relative(&ctx.repo.worktree_root, dir));
-        let prefix = dir
-            .strip_prefix(&ctx.repo.worktree_root)
-            .unwrap_or(Path::new(""));
-        for path in &steps.sync {
-            let source = ctx.repo.main_worktree_root().join(prefix).join(path);
-            let destination = dir.join(path);
-            if destination.exists() {
-                println!("  sync  {path}: already present, would skip");
-            } else if source.exists() && !ctx.repo.is_main_worktree() {
-                println!("  sync  {path}: symlink from {}", source.display());
-            } else if source.exists() {
-                println!("  sync  {path}: present in this worktree, would skip");
-            } else {
-                println!("  sync  {path}: missing everywhere, would report and continue");
-            }
-        }
-        for step in &steps.run {
-            print_step(step);
-        }
-    }
-
     let mut groups: PlannedComposeGroup = BTreeMap::new();
     let mut host: Vec<PlannedHostService> = Vec::new();
     let mut jobs: Vec<(String, String)> = Vec::new();
@@ -180,9 +150,88 @@ pub fn up(
         }
     }
 
+    // The plan's units, in the order the sections below print them, so the
+    // numbering in a dry run matches the run.
+    let mut units: Vec<progress::Unit> = Vec::new();
+    for (dir, _app, steps) in &targets {
+        let phase = format!(
+            "bootstrap {}",
+            display_relative(&ctx.repo.worktree_root, dir)
+        );
+        if !steps.sync.is_empty() {
+            units.push(progress::Unit::new(
+                phase.clone(),
+                format!("sync {}", steps.sync.join(", ")),
+            ));
+        }
+        for step in &steps.run {
+            units.push(progress::Unit::new(phase.clone(), step.command()));
+        }
+    }
+    for (file, services) in &groups {
+        units.push(progress::Unit::new(
+            format!("compose {file}"),
+            services
+                .iter()
+                .map(|service| service.name.clone())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ));
+    }
+    for service in &host {
+        units.push(progress::Unit::new("service", service.name.clone()));
+    }
+    for (name, _command) in &jobs {
+        units.push(progress::Unit::new("job", name.clone()));
+    }
+    for (dir, _app, steps) in &targets {
+        let phase = format!("after {}", display_relative(&ctx.repo.worktree_root, dir));
+        for step in &steps.after {
+            units.push(progress::Unit::new(phase.clone(), step.command()));
+        }
+    }
+    let mut cursor = 0usize;
+
+    if targets
+        .iter()
+        .any(|(_, _, steps)| !steps.sync.is_empty() || !steps.run.is_empty())
+    {
+        println!("\n# bootstrap");
+    }
+    for (dir, _app, steps) in &targets {
+        if steps.sync.is_empty() && steps.run.is_empty() {
+            continue;
+        }
+        if !steps.sync.is_empty() {
+            dry_unit(&units, &mut cursor);
+        }
+        println!("({})", display_relative(&ctx.repo.worktree_root, dir));
+        let prefix = dir
+            .strip_prefix(&ctx.repo.worktree_root)
+            .unwrap_or(Path::new(""));
+        for path in &steps.sync {
+            let source = ctx.repo.main_worktree_root().join(prefix).join(path);
+            let destination = dir.join(path);
+            if destination.exists() {
+                println!("  sync  {path}: already present, would skip");
+            } else if source.exists() && !ctx.repo.is_main_worktree() {
+                println!("  sync  {path}: symlink from {}", source.display());
+            } else if source.exists() {
+                println!("  sync  {path}: present in this worktree, would skip");
+            } else {
+                println!("  sync  {path}: missing everywhere, would report and continue");
+            }
+        }
+        for step in &steps.run {
+            dry_unit(&units, &mut cursor);
+            print_step(step);
+        }
+    }
+
     if !groups.is_empty() {
         println!("\n# compose");
         for (file, services) in &groups {
+            dry_unit(&units, &mut cursor);
             println!("{file}");
             println!(
                 "  would write {}/override-<hash>.yml and run:",
@@ -210,7 +259,7 @@ pub fn up(
                 }
             }
             println!(
-                "  docker compose -f <compose file> -f <override> -p <project> up -d{}",
+                "  docker compose -f <compose file> -f <override> -p <project> up -d{}  (skipped when this project is already up on an unchanged configuration; --refresh forces it)",
                 build_note(build)
             );
         }
@@ -219,6 +268,7 @@ pub fn up(
     if !host.is_empty() {
         println!("\n# host processes");
         for service in &host {
+            dry_unit(&units, &mut cursor);
             println!("{}", service.name);
             println!("  command  {}", service.command);
             println!(
@@ -252,6 +302,7 @@ pub fn up(
     if !jobs.is_empty() {
         println!("\n# jobs");
         for (name, command) in &jobs {
+            dry_unit(&units, &mut cursor);
             println!("{name}  {command}");
         }
     }
@@ -269,6 +320,7 @@ pub fn up(
             }
             println!("({})", display_relative(&ctx.repo.worktree_root, dir));
             for step in &steps.after {
+                dry_unit(&units, &mut cursor);
                 print_step(step);
             }
         }
@@ -283,28 +335,34 @@ pub fn up(
     Ok(())
 }
 
+/// Print the header for the next unit of the plan and advance the cursor.
+fn dry_unit(units: &[progress::Unit], cursor: &mut usize) {
+    if let Some(unit) = units.get(*cursor) {
+        println!(
+            "[{}/{}] {} \u{00b7} {}",
+            *cursor + 1,
+            units.len(),
+            unit.phase,
+            unit.subject
+        );
+    }
+    *cursor += 1;
+}
+
 /// One bootstrap step in the plan, with what decides whether it runs.
 fn print_step(step: &RunStep) {
-    let mut marker = if step.inputs().is_empty() {
-        "always runs".to_string()
-    } else {
-        format!("skipped when unchanged: {}", step.inputs().join(", "))
+    let mut marker = match (step.inputs().is_empty(), step.outputs().is_empty()) {
+        (true, true) => "always runs".to_string(),
+        (false, true) => format!("skipped when unchanged: {}", step.inputs().join(", ")),
+        (true, false) => format!("runs when missing: {}", step.outputs().join(", ")),
+        (false, false) => format!(
+            "skipped when unchanged ({}) and present: {}",
+            step.inputs().join(", "),
+            step.outputs().join(", ")
+        ),
     };
     if step.asks() {
         marker.push_str(", asks before running");
     }
     println!("  run   {}   ({marker})", step.command());
-}
-
-fn display_relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .map(|value| {
-            let text = value.display().to_string();
-            if text.is_empty() {
-                ".".to_string()
-            } else {
-                text
-            }
-        })
-        .unwrap_or_else(|_| path.display().to_string())
 }
