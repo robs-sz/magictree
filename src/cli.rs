@@ -2081,7 +2081,7 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
         let url = port
             .map(|port| {
                 let alias = worktree_url_alias(&aliases, port)
-                    .map(|alias| format!(" (alias {alias})"))
+                    .map(|alias| format!("   alias {alias}"))
                     .unwrap_or_default();
                 format!("http://localhost:{port}{alias}")
             })
