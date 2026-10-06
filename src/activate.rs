@@ -14,8 +14,9 @@
 //! `[env]`); a running stack writes it, so activation is a no-op in a worktree
 //! whose stack was never started.
 
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{Context, Result};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::ctx::runtime_dir_for;
 use crate::env::quote;
@@ -209,6 +210,92 @@ fn render(shell: Shell, mirror: &str) -> String {
     assignments
 }
 
+/// The rc file `--install` appends to.
+///
+/// zsh honors `$ZDOTDIR` the way zsh itself does (`${ZDOTDIR:-$HOME}/.zshrc`);
+/// bash and fish are fixed (`~/.bashrc`, `~/.config/fish/config.fish`).
+pub fn rc_file(shell: Shell, home: &Path, zdotdir: Option<&Path>) -> PathBuf {
+    match shell {
+        Shell::Zsh => zdotdir.unwrap_or(home).join(".zshrc"),
+        Shell::Bash => home.join(".bashrc"),
+        Shell::Fish => home.join(".config/fish/config.fish"),
+    }
+}
+
+/// The comment that ends the line and the string `install` looks for to stay
+/// idempotent.
+///
+/// It names the shell, so a file that already carries one shell's hook is not
+/// mistaken for another's, and it tells a reader of the rc file where the line
+/// came from.
+fn marker(shell: Shell) -> String {
+    format!("# added by magictree activate {}", shell.name())
+}
+
+/// The line `--install` appends: how this shell evaluates the snippet, then the
+/// marker.
+fn activation_line(shell: Shell, binary: &Path) -> String {
+    let binary = quote(&binary.to_string_lossy());
+    let marker = marker(shell);
+    match shell {
+        Shell::Zsh | Shell::Bash => {
+            format!("eval \"$({binary} activate {})\" {marker}", shell.name())
+        }
+        Shell::Fish => format!("{binary} activate fish | source {marker}"),
+    }
+}
+
+/// What [`install`] did, so the caller can report it.
+pub struct Install {
+    /// The rc file that was written, or already held the marker.
+    pub rc: PathBuf,
+    /// The line appended, exactly as it was written.
+    pub line: String,
+    /// False when the marker was already in the file, so nothing was appended.
+    pub wrote: bool,
+}
+
+/// Append this shell's activation line to its rc file.
+///
+/// The file is never parsed and never rewritten, only appended to, and the
+/// marker keeps a rerun a no-op. A file that already carries an equivalent hook
+/// added by hand has no marker, so this cannot see it: it appends a second line,
+/// which is why `wrote` is reported rather than assumed.
+pub fn install(
+    shell: Shell,
+    binary: &Path,
+    home: &Path,
+    zdotdir: Option<&Path>,
+) -> Result<Install> {
+    let rc = rc_file(shell, home, zdotdir);
+    let line = activation_line(shell, binary);
+    // A file we cannot read as UTF-8 is treated as without a marker. The worst
+    // that costs is one extra line; nothing already in the file is ever changed.
+    let existing = std::fs::read_to_string(&rc).unwrap_or_default();
+    if existing.contains(&marker(shell)) {
+        return Ok(Install {
+            rc,
+            line,
+            wrote: false,
+        });
+    }
+    if let Some(parent) = rc.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&rc)
+        .with_context(|| format!("opening {}", rc.display()))?;
+    writeln!(file, "\n{line}").with_context(|| format!("appending to {}", rc.display()))?;
+    Ok(Install {
+        rc,
+        line,
+        wrote: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +375,97 @@ mod tests {
         assert_eq!(Shell::from_shell_env(Some("fish")), Some(Shell::Fish));
         assert_eq!(Shell::from_shell_env(Some("/usr/bin/elvish")), None);
         assert_eq!(Shell::from_shell_env(None), None);
+    }
+
+    #[test]
+    fn rc_file_follows_each_shell_and_zdotdir() {
+        let home = Path::new("/home/dev");
+        let zdotdir = Path::new("/home/dev/zdot");
+        assert_eq!(rc_file(Shell::Zsh, home, None), home.join(".zshrc"));
+        assert_eq!(
+            rc_file(Shell::Zsh, home, Some(zdotdir)),
+            zdotdir.join(".zshrc")
+        );
+        assert_eq!(
+            rc_file(Shell::Bash, home, Some(zdotdir)),
+            home.join(".bashrc")
+        );
+        assert_eq!(
+            rc_file(Shell::Fish, home, None),
+            home.join(".config/fish/config.fish")
+        );
+    }
+
+    #[test]
+    fn activation_lines_evaluate_the_snippet_and_carry_the_marker() {
+        let binary = Path::new("/opt/bin/magictree");
+        assert_eq!(
+            activation_line(Shell::Zsh, binary),
+            r#"eval "$(/opt/bin/magictree activate zsh)" # added by magictree activate zsh"#
+        );
+        assert_eq!(
+            activation_line(Shell::Bash, binary),
+            r#"eval "$(/opt/bin/magictree activate bash)" # added by magictree activate bash"#
+        );
+        assert_eq!(
+            activation_line(Shell::Fish, binary),
+            r#"/opt/bin/magictree activate fish | source # added by magictree activate fish"#
+        );
+    }
+
+    #[test]
+    fn activation_lines_quote_a_binary_path_with_spaces() {
+        let binary = Path::new("/opt/my tools/magictree");
+        assert_eq!(
+            activation_line(Shell::Zsh, binary),
+            r#"eval "$("/opt/my tools/magictree" activate zsh)" # added by magictree activate zsh"#
+        );
+        assert_eq!(
+            activation_line(Shell::Fish, binary),
+            r#""/opt/my tools/magictree" activate fish | source # added by magictree activate fish"#
+        );
+    }
+
+    #[test]
+    fn install_appends_once_and_is_a_no_op_after_that() {
+        let home = tempfile::tempdir().expect("temp home");
+        let binary = Path::new("/opt/bin/magictree");
+
+        let first = install(Shell::Zsh, binary, home.path(), None).expect("install");
+        assert!(first.wrote);
+        let contents = std::fs::read_to_string(home.path().join(".zshrc")).expect("read rc");
+        assert!(contents.contains(&first.line), "{contents}");
+        assert!(
+            contents.ends_with('\n'),
+            "the file stays newline-terminated"
+        );
+
+        let second = install(Shell::Zsh, binary, home.path(), None).expect("install again");
+        assert!(!second.wrote);
+        let contents = std::fs::read_to_string(home.path().join(".zshrc")).expect("read rc");
+        assert_eq!(
+            contents
+                .matches("# added by magictree activate zsh")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn install_writes_into_zdotdir_and_creates_fish_directories() {
+        let home = tempfile::tempdir().expect("temp home");
+        let zdotdir = home.path().join("zdot");
+        std::fs::create_dir_all(&zdotdir).expect("create zdotdir");
+        let binary = Path::new("/opt/bin/magictree");
+
+        install(Shell::Zsh, binary, home.path(), Some(&zdotdir)).expect("install zsh");
+        assert!(zdotdir.join(".zshrc").is_file());
+        assert!(
+            !home.path().join(".zshrc").exists(),
+            "ZDOTDIR wins over HOME"
+        );
+
+        install(Shell::Fish, binary, home.path(), None).expect("install fish");
+        assert!(home.path().join(".config/fish/config.fish").is_file());
     }
 }

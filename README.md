@@ -195,10 +195,15 @@ eval "$(magictree activate zsh)"      # or bash
 magictree activate fish | source      # or fish
 ```
 
-zsh, bash and fish are supported; `--shell` names the one to print when `$SHELL` does not say
-it. The snippet hooks the directory change and the prompt, exports the environment `up`
-wrote, and unsets the keys a previous worktree exported, so leaving a checkout leaves nothing
-behind.
+zsh, bash and fish are supported; name the shell as the argument, and `$SHELL` picks it when
+it is omitted. The snippet hooks the directory change and the prompt, exports the environment
+`up` wrote, and unsets the keys a previous worktree exported, so leaving a checkout leaves
+nothing behind.
+
+`magictree activate <shell> --install` appends that line to the shell's rc file for you —
+`~/.zshrc` (honoring `$ZDOTDIR`), `~/.bashrc`, or `~/.config/fish/config.fish` — and reports
+the path and how to load it. It only ever appends, never rewrites, and a marker comment keeps
+a second run from adding the line twice.
 
 It syncs from the environment mirror `up` writes in the state dir (`env` under the worktree's
 runtime directory) rather than rebuilding the plan: activation costs a file read, allocates

@@ -10,7 +10,7 @@ use crate::dryrun;
 use crate::health;
 use crate::init;
 use crate::manifest::{self, Node, NodeKind, Runtime, Wait};
-use crate::paths::{display_relative, Paths};
+use crate::paths::{display_relative, home, Paths};
 use crate::ports;
 use crate::progress;
 use crate::repo::Repo;
@@ -91,6 +91,10 @@ pub struct ActivateArgs {
     /// a tool can read the same environment once without a snippet.
     #[arg(long)]
     pub emit: bool,
+    /// Append the activation line to this shell's rc file instead of printing
+    /// the snippet. A marker comment keeps a rerun from adding a second line.
+    #[arg(long, conflicts_with = "emit")]
+    pub install: bool,
     #[arg(long, short = 'C')]
     pub cwd: Option<PathBuf>,
 }
@@ -432,21 +436,42 @@ fn cmd_completion(args: CompletionArgs) -> Result<()> {
 ///
 /// The snippet is evaluated once from an rc file; `--emit` is what it runs per
 /// prompt. Both resolve the worktree from the directory they run in, so one
-/// snippet follows the shell between checkouts.
+/// snippet follows the shell between checkouts. `--install` writes the line that
+/// evaluates the snippet into the shell's rc file for the user.
 fn cmd_activate(args: ActivateArgs) -> Result<()> {
-    let cwd = resolve_cwd(args.cwd)?;
     let shell = args
         .shell
         .or_else(|| activate::Shell::from_shell_env(std::env::var("SHELL").ok().as_deref()))
         .ok_or_else(|| {
             anyhow!("could not tell which shell to activate; name one of zsh, bash or fish")
         })?;
-    if args.emit {
-        print!("{}", activate::emit(shell, &cwd)?);
+    if args.install {
+        // zsh reads `${ZDOTDIR:-$HOME}/.zshrc`; an unset or empty ZDOTDIR is HOME.
+        let zdotdir = std::env::var_os("ZDOTDIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let install = activate::install(
+            shell,
+            &std::env::current_exe()?,
+            &home()?,
+            zdotdir.as_deref(),
+        )?;
+        if install.wrote {
+            println!("added activation to {}", install.rc.display());
+            println!(
+                "restart your shell or run 'source {}'",
+                install.rc.display()
+            );
+        } else {
+            println!("activation already in {}", install.rc.display());
+        }
         return Ok(());
     }
-    let binary = std::env::current_exe()?;
-    print!("{}", activate::snippet(shell, &binary));
+    if args.emit {
+        print!("{}", activate::emit(shell, &resolve_cwd(args.cwd)?)?);
+        return Ok(());
+    }
+    print!("{}", activate::snippet(shell, &std::env::current_exe()?));
     Ok(())
 }
 

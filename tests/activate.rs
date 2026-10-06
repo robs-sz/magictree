@@ -3,6 +3,7 @@
 
 mod support;
 
+use std::path::Path;
 use std::process::Command;
 
 use support::{bin, run, runtime_dirs, Fixture};
@@ -36,6 +37,15 @@ fn command(fixture: &Fixture) -> Command {
         .env("MAGICTREE_STATE_DIR", &state)
         .env("MAGICTREE_CONFIG_DIR", state.join("config"))
         .env("MAGICTREE_NO_UPDATE_CHECK", "1");
+    command
+}
+
+/// The binary with an isolated `$HOME` too, for `--install`: it must write into a
+/// temp rc file rather than the developer's. `$ZDOTDIR` is cleared unless a test
+/// sets it.
+fn install_command(fixture: &Fixture, home: &Path) -> Command {
+    let mut command = command(fixture);
+    command.env("HOME", home).env_remove("ZDOTDIR");
     command
 }
 
@@ -156,4 +166,85 @@ fn a_shell_we_cannot_hook_is_refused() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn install_appends_the_activation_line_once() {
+    let fixture = Fixture::new();
+    let home = tempfile::tempdir().expect("temp home");
+
+    let first = install_command(&fixture, home.path())
+        .args(["activate", "zsh", "--install"])
+        .output()
+        .expect("run magictree");
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let rc = home.path().join(".zshrc");
+    let contents = std::fs::read_to_string(&rc).expect("read rc");
+    assert!(contents.contains("activate zsh"), "{contents}");
+    assert!(
+        contents.contains("# added by magictree activate zsh"),
+        "{contents}"
+    );
+
+    // A second install finds the marker and appends nothing.
+    let second = install_command(&fixture, home.path())
+        .args(["activate", "zsh", "--install"])
+        .output()
+        .expect("run magictree");
+    assert!(second.status.success());
+    let contents = std::fs::read_to_string(&rc).expect("read rc");
+    assert_eq!(
+        contents
+            .matches("# added by magictree activate zsh")
+            .count(),
+        1,
+        "{contents}"
+    );
+}
+
+#[test]
+fn install_honors_zdotdir_for_zsh() {
+    let fixture = Fixture::new();
+    let home = tempfile::tempdir().expect("temp home");
+    let zdotdir = home.path().join("zdot");
+    std::fs::create_dir_all(&zdotdir).expect("create zdotdir");
+
+    let output = install_command(&fixture, home.path())
+        .env("ZDOTDIR", &zdotdir)
+        .args(["activate", "zsh", "--install"])
+        .output()
+        .expect("run magictree");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(zdotdir.join(".zshrc").is_file(), "ZDOTDIR is written");
+    assert!(!home.path().join(".zshrc").exists(), "HOME is not");
+}
+
+#[test]
+fn install_creates_the_fish_config_under_home() {
+    let fixture = Fixture::new();
+    let home = tempfile::tempdir().expect("temp home");
+
+    let output = install_command(&fixture, home.path())
+        .args(["activate", "fish", "--install"])
+        .output()
+        .expect("run magictree");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = home.path().join(".config/fish/config.fish");
+    let contents = std::fs::read_to_string(&config).expect("read fish config");
+    assert!(contents.contains("activate fish | source"), "{contents}");
 }

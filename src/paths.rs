@@ -86,7 +86,7 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-fn home() -> Result<PathBuf> {
+pub(crate) fn home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME is not set")
