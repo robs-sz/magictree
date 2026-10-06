@@ -1375,7 +1375,13 @@ fn plan_units(
                             display_relative(&ctx.repo.worktree_root, &key.0),
                             key.1
                         ),
-                        containers.join(" "),
+                        match containers.as_slice() {
+                            // A single container still reads by name; a list of
+                            // a dozen runs to a full line and wraps, so the count
+                            // stands in, and the names are one `--verbose` away.
+                            [only] => only.clone(),
+                            _ => format!("{} services", containers.len()),
+                        },
                     ));
                     position = end;
                 }
@@ -1603,7 +1609,6 @@ fn ensure(
                             .expect("validated compose reference")
                             .service
                             .as_str();
-                        step.detail(&format!("{}: starting container", batch_node.qual()));
                         args.push(container);
                     }
                     let alias_name = if skip_build {
@@ -1677,7 +1682,7 @@ fn ensure(
                                             &env,
                                             Duration::from_secs(initializer_timeout(ctx)),
                                         )?;
-                                        step.detail(&format!("{container}: exited 0"));
+                                        step.detail(&format!("{container}: starting → exited 0"));
                                     }
                                     Wait::Running => {
                                         wait_ready(
@@ -1687,7 +1692,7 @@ fn ensure(
                                             &assignment,
                                             Some((runner, container)),
                                         )?;
-                                        step.detail(&format!("{container}: healthy"));
+                                        step.detail(&format!("{container}: starting → healthy"));
                                     }
                                 }
                             }

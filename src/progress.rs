@@ -11,6 +11,51 @@ use std::time::{Duration, Instant};
 /// The separator between a step's phase and its subject, defined once.
 const SEPARATOR: &str = " · ";
 
+/// The indent before a detail or result line (`     {line}`).
+const INDENT: usize = 5;
+
+/// The terminal's usable width in columns, or `None` when stdout is not a
+/// terminal or the size cannot be read.
+///
+/// One column is reserved: a line that fills the last column makes a terminal
+/// wrap the cursor to the next row, and the live status line is rewritten with
+/// `\r` + clear-to-end-of-line, which can only erase the row the cursor is on.
+/// Keeping every line short enough to fit one row is what makes that rewrite
+/// safe — a long line that wrapped left the second row behind on every tick.
+fn terminal_width() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut size: nix::libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: `TIOCGWINSZ` writes a `winsize` through the pointer it is
+        // given, and `size` is exactly that type, owned and aligned.
+        let result =
+            unsafe { nix::libc::ioctl(nix::libc::STDOUT_FILENO, nix::libc::TIOCGWINSZ, &mut size) };
+        if result == 0 && size.ws_col > 1 {
+            return Some(size.ws_col as usize - 1);
+        }
+    }
+    None
+}
+
+/// `text` cut to fit `width` columns, ending in an ellipsis when it had to lose
+/// anything. Counts characters rather than display columns: a line of double
+/// width glyphs can still overflow, which only matters for a rare non-ASCII
+/// label and is not worth a width table.
+fn fit(text: &str, width: Option<usize>) -> String {
+    let Some(width) = width else {
+        return text.to_string();
+    };
+    if width == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(width - 1).collect();
+    out.push('…');
+    out
+}
+
 /// One step of the plan `up` is about to execute.
 pub struct Unit {
     pub phase: String,
@@ -82,12 +127,15 @@ impl Progress {
                 format!("[{}/?]{SEPARATOR}", index + 1)
             }
         };
-        println!("{label}");
+        // Truncate only on a terminal: a log file or a test keeps every column.
+        let width = if self.live { terminal_width() } else { None };
+        println!("{}", fit(&label, width));
         Step {
             label,
             started: Instant::now(),
             live: self.live,
             quiet: self.quiet,
+            width,
             painter: None,
         }
     }
@@ -105,27 +153,35 @@ pub struct Step {
     started: Instant,
     live: bool,
     quiet: bool,
+    /// Usable columns when the plan runs on a terminal, `None` otherwise.
+    width: Option<usize>,
     painter: Option<Painter>,
 }
 
 impl Step {
-    /// `     {line}` — the per-step detail (`cached`, `linked`, `{qual}: starting container`).
-    /// Suppressed by `--quiet`.
+    /// `     {line}` — the per-step detail (`cached`, `linked`,
+    /// `{container}: starting → healthy`). Suppressed by `--quiet`.
     pub fn detail(&mut self, line: &str) {
         if !self.quiet {
             self.clear_live();
-            println!("     {line}");
+            println!(
+                "{:INDENT$}{}",
+                "",
+                fit(line, self.width.map(|width| width.saturating_sub(INDENT)))
+            );
         }
     }
 
     /// `     {line}`, with ` {1.3s}` appended on a terminal. Always printed.
     pub fn result(&mut self, line: &str) {
         self.clear_live();
-        if self.live {
-            println!("     {line} {:.1}s", self.started.elapsed().as_secs_f64());
+        let text = if self.live {
+            format!("{line} {:.1}s", self.started.elapsed().as_secs_f64())
         } else {
-            println!("     {line}");
-        }
+            line.to_string()
+        };
+        let text = fit(&text, self.width.map(|width| width.saturating_sub(INDENT)));
+        println!("{:INDENT$}{text}", "");
     }
 
     /// A status line while the step blocks: on a terminal it is rewritten in
@@ -135,11 +191,17 @@ impl Step {
         if !self.live {
             return;
         }
-        let line = format!("{}{SEPARATOR}{text}", self.label);
+        let line = self.status_line(text);
         match &self.painter {
             Some(painter) => painter.set(line),
             None => self.painter = Some(Painter::start(line)),
         }
+    }
+
+    /// The composed live line, cut to the usable width so the in-place rewrite
+    /// never leaves a wrapped row behind.
+    fn status_line(&self, text: &str) -> String {
+        fit(&format!("{}{SEPARATOR}{text}", self.label), self.width)
     }
 
     /// Stop the painter and erase the live line, so the next `println!` starts
@@ -260,5 +322,50 @@ mod tests {
         let mut step = progress.step();
         step.detail("hidden");
         step.result("done");
+    }
+
+    #[test]
+    fn fit_truncates_to_the_width_and_leaves_short_lines_alone() {
+        assert_eq!(fit("hello", None), "hello");
+        assert_eq!(fit("hello", Some(10)), "hello");
+        assert_eq!(fit("hello", Some(5)), "hello");
+        assert_eq!(fit("hello world", Some(8)), "hello w…");
+        assert_eq!(fit("hello", Some(0)), "");
+        // Counts characters, so a multi-byte subject is never cut mid-glyph.
+        assert_eq!(fit("héllo wörld", Some(6)), "héllo…");
+    }
+
+    #[test]
+    fn the_live_status_line_is_cut_to_the_usable_width() {
+        // A step built by hand: the header printed for this label would wrap a
+        // narrow terminal, and the in-place rewrite cannot erase a wrapped row,
+        // so the composed status line must fit the width it was given.
+        let label =
+            "[6/10] compose compose.yaml (project a-rather-long-project-name) · 12 services";
+        let step = Step {
+            label: label.to_string(),
+            started: Instant::now(),
+            live: true,
+            quiet: false,
+            width: Some(40),
+            painter: None,
+        };
+        let line = step.status_line("starting containers");
+        assert_eq!(line.chars().count(), 40, "{line}");
+        assert!(line.ends_with('…'), "{line}");
+
+        // A width the caller never set (off a terminal) leaves the line whole.
+        let wide = Step {
+            label: label.to_string(),
+            started: Instant::now(),
+            live: false,
+            quiet: false,
+            width: None,
+            painter: None,
+        };
+        assert_eq!(
+            wide.status_line("starting containers"),
+            format!("{label}{SEPARATOR}starting containers")
+        );
     }
 }

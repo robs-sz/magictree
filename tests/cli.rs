@@ -315,6 +315,11 @@ esac
         init_exited.exists(),
         "the one-shot completed before its job"
     );
+
+    // Each container reports its transition as one line, not a line per event.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("db: starting → healthy"), "{stdout}");
+    assert!(stdout.contains("init: starting → exited 0"), "{stdout}");
 }
 
 // --- Compose reconciliation fixtures -----------------------------------------
