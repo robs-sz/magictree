@@ -1,3 +1,4 @@
+use crate::activate;
 use crate::banner;
 use crate::bootstrap;
 use crate::compose::{self, ComposeRunner, ContainerState};
@@ -71,10 +72,27 @@ pub enum Command {
     Env(EnvArgs),
     /// Run a command with this worktree's resolved environment.
     Exec(ExecArgs),
+    /// Keep this shell's environment in step with the worktree it sits in.
+    Activate(ActivateArgs),
     /// Print a shell completion script.
     Completion(CompletionArgs),
     /// Install the latest release over this binary.
     Update(UpdateArgs),
+}
+
+#[derive(Args)]
+pub struct ActivateArgs {
+    /// Shell to activate; defaults to the one `$SHELL` names.
+    #[arg(value_enum)]
+    pub shell: Option<activate::Shell>,
+    /// Print the current worktree's environment instead of the snippet.
+    ///
+    /// The snippet calls this on every prompt; it is documented so a script or
+    /// a tool can read the same environment once without a snippet.
+    #[arg(long)]
+    pub emit: bool,
+    #[arg(long, short = 'C')]
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -390,6 +408,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Command::Ports(args) => cmd_ports(args, dry_run),
         Command::Env(args) => cmd_env(args, dry_run),
         Command::Exec(args) => cmd_exec(args, dry_run),
+        Command::Activate(args) => cmd_activate(args),
         Command::Completion(args) => cmd_completion(args),
         Command::Update(args) => cmd_update(args, dry_run),
     };
@@ -406,6 +425,28 @@ fn cmd_completion(args: CompletionArgs) -> Result<()> {
     let mut command = Cli::command();
     let name = command.get_name().to_string();
     clap_complete::generate(args.shell, &mut command, name, &mut std::io::stdout());
+    Ok(())
+}
+
+/// Print a shell's activation snippet, or the environment the snippet applies.
+///
+/// The snippet is evaluated once from an rc file; `--emit` is what it runs per
+/// prompt. Both resolve the worktree from the directory they run in, so one
+/// snippet follows the shell between checkouts.
+fn cmd_activate(args: ActivateArgs) -> Result<()> {
+    let cwd = resolve_cwd(args.cwd)?;
+    let shell = args
+        .shell
+        .or_else(|| activate::Shell::from_shell_env(std::env::var("SHELL").ok().as_deref()))
+        .ok_or_else(|| {
+            anyhow!("could not tell which shell to activate; name one of zsh, bash or fish")
+        })?;
+    if args.emit {
+        print!("{}", activate::emit(shell, &cwd)?);
+        return Ok(());
+    }
+    let binary = std::env::current_exe()?;
+    print!("{}", activate::snippet(shell, &binary));
     Ok(())
 }
 

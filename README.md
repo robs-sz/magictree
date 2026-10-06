@@ -138,6 +138,7 @@ never built and never asked about.
 | `up`, `down`, `restart`, `status` | start, stop, restart specific services, inspect a worktree's stack |
 | `logs`, `env`, `ports` | service output (one service, or `--all` for the whole stack, Compose included), resolved environment, port assignment |
 | `exec` | run a command with this worktree's resolved environment |
+| `activate` | keep a shell's own environment in step with the worktree it sits in |
 | `new`, `rm`, `list`, `gc` | worktree lifecycle and resource reclamation |
 | `completion` | a shell completion script, printed to stdout |
 | `update` | install the latest release over this binary |
@@ -181,6 +182,33 @@ zsh loads a completion only from a directory on `$fpath`, so `~/.zsh/completions
 completion, and open a new shell. A shell that was already running reuses its `~/.zcompdump`,
 keeps the registration even when the file it names has moved, and fails on Tab with
 `_magictree: function definition file not found` until the shell is restarted.
+
+## Activation
+
+`magictree env` reaches a process magictree launched, and `exec` wraps one command. A shell
+can instead keep its *own* environment in step with the worktree it sits in, so anything
+started from it afterwards — an agent, an editor, a recipe — reads the same ports and `[env]`
+a service does. Evaluate one line from the shell's rc file:
+
+```sh
+eval "$(magictree activate zsh)"      # or bash
+magictree activate fish | source      # or fish
+```
+
+zsh, bash and fish are supported; `--shell` names the one to print when `$SHELL` does not say
+it. The snippet hooks the directory change and the prompt, exports the environment `up`
+wrote, and unsets the keys a previous worktree exported, so leaving a checkout leaves nothing
+behind.
+
+It syncs from the environment mirror `up` writes in the state dir (`env` under the worktree's
+runtime directory) rather than rebuilding the plan: activation costs a file read, allocates
+nothing, and stays a no-op in a worktree whose stack was never started. That also means the
+mirror carries the workspace layers — the computed ports and `[env]` — so an app's own `[env]`
+still wants `magictree env --app <app>` or `exec --app <app>`.
+
+`magictree activate --emit <shell>` prints that environment once, in the shell's syntax, for a
+script or a tool that reads it directly from the process environment instead of from a
+snippet.
 
 ## Updating
 

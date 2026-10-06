@@ -222,6 +222,15 @@ shell), and exits with the command's own status. Prefer it over hand-rolling
 `eval "$(magictree env --export)"`; reach for `magictree exec -- sh -c '...'` when the
 command needs a shell (`|`, `&&`, globs).
 
+A shell can carry that environment itself instead of wrapping each command:
+`eval "$(magictree activate zsh)"` (bash and fish too) keeps the shell in step with the
+worktree it sits in, so a tool it launches afterwards — an agent, an editor — reads the same
+ports and `[env]` without being wrapped. It syncs from the mirror `up` writes in the state
+dir, so activation costs a file read, allocates nothing, and prints nothing in a worktree
+whose stack was never started. `magictree activate --emit <shell>` prints that environment
+once for a tool that reads the process environment directly. Both carry the workspace layers,
+so an app's own `[env]` still needs `--app`.
+
 Never edit or overwrite repository `.env` files. magictree injects the environment into the
 processes it launches; the repository's own files are left alone.
 
