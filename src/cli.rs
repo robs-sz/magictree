@@ -441,7 +441,7 @@ fn cmd_bare(dry_run: bool) -> Result<()> {
 
 /// Print a completion script to stdout. Install it with, for example:
 ///   magictree completion zsh > ~/.zsh/completions/_magictree
-/// zsh loads it from a directory that was on `$fpath` when `compinit` ran; see the README.
+/// zsh loads it from a directory that was on `$fpath` when `compinit` ran; see docs/commands.md.
 fn cmd_completion(args: CompletionArgs) -> Result<()> {
     let mut command = Cli::command();
     let name = command.get_name().to_string();
