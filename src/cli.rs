@@ -1822,6 +1822,13 @@ fn worktree_url_alias(aliases: &BTreeMap<u16, String>, port: u16) -> Option<Stri
         .map(|host| format!("http://{host}:{port}"))
 }
 
+/// The one URL a port is listed under: its `browser_alias` one where it opted
+/// in, since that is the address the stack itself hands a browser, and the
+/// `localhost` one otherwise.
+fn shown_url(aliases: &BTreeMap<u16, String>, port: u16) -> String {
+    worktree_url_alias(aliases, port).unwrap_or_else(|| format!("http://localhost:{port}"))
+}
+
 /// Everything reachable, so it is obvious how to use the stack once it is up.
 fn print_summary(ctx: &Ctx, selection: &[usize], assignment: &ports::Assignment) {
     let aliases = ctx.browser_url_aliases(assignment);
@@ -1852,11 +1859,8 @@ fn print_summary(ctx: &Ctx, selection: &[usize], assignment: &ports::Assignment)
             .max()
             .unwrap_or(4);
         for (label, port) in &reachable {
-            if let Some(alias) = worktree_url_alias(&aliases, *port) {
-                println!("{label:<width$}   http://localhost:{port}   alias {alias}");
-            } else {
-                println!("{label:<width$}   http://localhost:{port}");
-            }
+            let url = shown_url(&aliases, *port);
+            println!("{label:<width$}   {url}");
         }
     }
     if !internal.is_empty() {
@@ -2106,16 +2110,17 @@ impl StatusRow {
     pub fn url(&self) -> Option<String> {
         self.port.map(|port| format!("http://localhost:{port}"))
     }
+
+    /// The URL the service is listed under: its alias where it has one.
+    pub fn shown_url(&self) -> Option<String> {
+        self.alias.clone().or_else(|| self.url())
+    }
 }
 
 fn cmd_status(args: StatusArgs) -> Result<()> {
     let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
     for row in status_rows(&ctx, args.probe)? {
-        let url = match (row.url(), &row.alias) {
-            (Some(url), Some(alias)) => format!("{url}   alias {alias}"),
-            (Some(url), None) => url,
-            (None, _) => String::new(),
-        };
+        let url = row.shown_url().unwrap_or_default();
         println!(
             "{:<24} {:<8} {:<28} {}",
             row.qual, row.runtime, row.state, url
@@ -2614,10 +2619,8 @@ fn cmd_ports(args: PortsArgs, dry_run: bool) -> Result<()> {
     );
     let aliases = ctx.browser_url_aliases(&assignment);
     for (name, port) in &assignment.ports {
-        let alias = worktree_url_alias(&aliases, *port)
-            .map(|alias| format!("   alias {alias}"))
-            .unwrap_or_default();
-        println!("{name:<24} {port:<6} http://localhost:{port}{alias}");
+        let url = shown_url(&aliases, *port);
+        println!("{name:<24} {port:<6} {url}");
     }
     Ok(())
 }
