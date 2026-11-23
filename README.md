@@ -20,6 +20,17 @@ own, with their own ports and their own state.
 `magictree` on its own opens this screen on the worktree it is run in; every key in it runs
 one of the commands below.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/robs-sz/magictree/main/install.sh | sh
+```
+
+The script downloads the release built for your machine (macOS on Apple silicon or Intel,
+Linux on x86-64), checks that it runs, and puts one binary in `~/.local/bin`. The same
+archives are on the [releases page](https://github.com/robs-sz/magictree/releases), and
+`magictree update` keeps an installed copy current.
+
 ## Quick start
 
 Onboard once, in the primary checkout, and commit the manifest — a worktree inherits only
