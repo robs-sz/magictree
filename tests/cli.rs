@@ -3112,3 +3112,21 @@ port = { env = "PORT2" }
 
     assert!(run(&["down"], fixture.path(), &state).ok());
 }
+
+/// A bare `magictree` opens the TUI, which needs a terminal. In a pipe or a
+/// script it stays what it was: the help on stderr and a usage error.
+#[test]
+fn bare_magictree_without_a_terminal_prints_the_help() {
+    let fixture = host_stack_fixture();
+    let state = fixture.state_dir();
+
+    let result = run(&[], fixture.path(), &state);
+    assert_eq!(result.status, 2, "{}", result.combined());
+    assert!(result.stdout.is_empty(), "{}", result.stdout);
+    assert!(
+        result.stderr.contains("Usage: magictree"),
+        "{}",
+        result.stderr
+    );
+    assert!(result.stderr.contains("restart"), "{}", result.stderr);
+}

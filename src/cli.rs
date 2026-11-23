@@ -15,6 +15,7 @@ use crate::ports;
 use crate::progress;
 use crate::repo::Repo;
 use crate::run;
+use crate::tui;
 use crate::update;
 use crate::worktrees;
 use anyhow::{anyhow, bail, Context, Result};
@@ -36,8 +37,10 @@ pub struct Cli {
     /// Print what would happen and create nothing.
     #[arg(long, short = 'n', global = true)]
     pub dry_run: bool,
+    /// Without one, `magictree` opens the TUI on the worktree it is run in:
+    /// the screen has no command of its own.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -395,8 +398,11 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     let dry_run = cli.dry_run;
     // `update` is about the binary itself, a failed command has said enough of
     // its own, and a dry run writes nothing — not even the check's cache.
-    let announce = !dry_run && !matches!(cli.command, Command::Update(_));
-    let outcome = match cli.command {
+    let Some(command) = cli.command else {
+        return cmd_bare(dry_run);
+    };
+    let announce = !dry_run && !matches!(command, Command::Update(_));
+    let outcome = match command {
         Command::Discover(args) => cmd_discover(args, dry_run),
         Command::Init(args) => cmd_init(args, dry_run),
         Command::Doctor(args) => cmd_doctor(args),
@@ -420,6 +426,17 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         update::notice();
     }
     outcome
+}
+
+/// `magictree` with no command: the TUI, on a terminal. Anywhere else there is
+/// no screen to open, so it answers the way a missing command always has —
+/// the help, on stderr, and a usage error's exit code.
+fn cmd_bare(dry_run: bool) -> Result<()> {
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        return tui::run(&std::env::current_dir()?, dry_run);
+    }
+    eprintln!("{}", command().render_help());
+    std::process::exit(2);
 }
 
 /// Print a completion script to stdout. Install it with, for example:
@@ -2073,8 +2090,44 @@ fn cmd_restart(args: RestartArgs, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+/// One service of a worktree's stack, as `status` reports it.
+pub(crate) struct StatusRow {
+    /// The service's index in `Ctx::nodes`.
+    pub index: usize,
+    pub qual: String,
+    pub runtime: &'static str,
+    pub state: String,
+    pub port: Option<u16>,
+    /// The `<slug>.localhost` URL of a port that opted into `browser_alias`.
+    pub alias: Option<String>,
+}
+
+impl StatusRow {
+    pub fn url(&self) -> Option<String> {
+        self.port.map(|port| format!("http://localhost:{port}"))
+    }
+}
+
 fn cmd_status(args: StatusArgs) -> Result<()> {
     let ctx = Ctx::load(&resolve_cwd(args.cwd)?)?;
+    for row in status_rows(&ctx, args.probe)? {
+        let url = match (row.url(), &row.alias) {
+            (Some(url), Some(alias)) => format!("{url}   alias {alias}"),
+            (Some(url), None) => url,
+            (None, _) => String::new(),
+        };
+        println!(
+            "{:<24} {:<8} {:<28} {}",
+            row.qual, row.runtime, row.state, url
+        );
+    }
+    Ok(())
+}
+
+/// The state of every service in the worktree, in manifest order: a live pid
+/// for a host process, what `docker compose ps` says for a container. Reads
+/// only, so it is safe to call as often as a display wants.
+pub(crate) fn status_rows(ctx: &Ctx, probe: bool) -> Result<Vec<StatusRow>> {
     let assignment = ports::load(&ctx.paths, &ctx.repo.key(), &ctx.repo.worktree_id())?;
     let runners: HashMap<(PathBuf, String), ComposeRunner> = ctx
         .compose_identities()
@@ -2089,6 +2142,7 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
         .map(|assignment| ctx.browser_url_aliases(assignment))
         .unwrap_or_default();
     let mut states: HashMap<(PathBuf, String), Vec<ContainerState>> = HashMap::new();
+    let mut rows = Vec::new();
 
     for &index in &ctx.all_service_indices() {
         let node = &ctx.nodes[index];
@@ -2129,7 +2183,7 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
             },
         };
 
-        if args.probe {
+        if probe {
             if let (Some(health_spec), Some(port)) = (&service.health, port) {
                 let timeout = Duration::from_secs(2);
                 let env = ctx.node_env(node, assignment.as_ref().unwrap_or(&EMPTY_ASSIGNMENT))?;
@@ -2149,26 +2203,19 @@ fn cmd_status(args: StatusArgs) -> Result<()> {
             }
         }
 
-        let url = port
-            .map(|port| {
-                let alias = worktree_url_alias(&aliases, port)
-                    .map(|alias| format!("   alias {alias}"))
-                    .unwrap_or_default();
-                format!("http://localhost:{port}{alias}")
-            })
-            .unwrap_or_default();
-        println!(
-            "{:<24} {:<8} {:<28} {}",
-            node.qual(),
-            match node.runtime() {
+        rows.push(StatusRow {
+            index,
+            qual: node.qual(),
+            runtime: match node.runtime() {
                 Some(Runtime::Compose) => "compose",
                 _ => "host",
             },
             state,
-            url
-        );
+            port,
+            alias: port.and_then(|port| worktree_url_alias(&aliases, port)),
+        });
     }
-    Ok(())
+    Ok(rows)
 }
 
 /// A section of `logs`: one Compose project, or one host service.

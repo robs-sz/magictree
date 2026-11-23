@@ -24,6 +24,7 @@ pub mod progress;
 pub mod repo;
 pub mod run;
 pub mod slug;
+pub mod tui;
 pub mod update;
 pub mod worktrees;
 

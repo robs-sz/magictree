@@ -91,6 +91,7 @@ that no manifest manages (the command still succeeds).
 magictree up            # build images, allocate ports, bootstrap, start services, wait for health
 magictree up --no-build # skip the image build for a stack already built
 magictree status        # what is running, on which port
+magictree               # the same on one screen (the TUI), for a person: needs a terminal, so never run it from an agent
 magictree ports         # the port assignment as URLs
 magictree logs web -f   # follow one service's output
 magictree logs --all     # every service's output, Compose projects included

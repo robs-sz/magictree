@@ -136,6 +136,7 @@ never built and never asked about.
 |---|---|
 | `discover`, `init`, `doctor` | read the repository, write manifests, detect drift |
 | `up`, `down`, `restart`, `status` | start, stop, restart specific services, inspect a worktree's stack |
+| *(no command)* | the TUI: every service's state, its log, ports and environment on one screen, with `up`, `restart`, `down` a key away |
 | `logs`, `env`, `ports` | service output (one service, or `--all` for the whole stack, Compose included), resolved environment, port assignment |
 | `exec` | run a command with this worktree's resolved environment |
 | `activate` | keep a shell's own environment in step with the worktree it sits in |
@@ -144,6 +145,21 @@ never built and never asked about.
 | `update` | install the latest release over this binary |
 
 `--dry-run` works on every command and creates nothing: `magictree -n up`.
+
+`magictree` on its own opens the TUI on the worktree it is run in. The screen is a row of
+sections — `services`, `worktrees`, `ports`, `env`, `logs` — and a digit, `tab`, or `:` and
+the section's name (or an alias: `:svc`, `:wt`, `:p`, `:e`, `:logs web`) switches between
+them. In `services`, `l` (or `enter`) follows the selected service's log, `s` starts it with
+what it needs, `r` restarts it, `u` runs `up` and `d` runs `down` after a `y` (those two
+also from `ports` and `env`), and
+`o` opens its URL (its `browser_alias` one, shown in its place, when the port has one). The
+prompt only navigates — sections and `:q` — so nothing that changes a stack is ever a typed
+word. Each key runs the command a shell would, and its output stays on screen; under `-n`, each is a
+dry run. `worktrees` lists every worktree magictree has recorded: `enter` opens that
+one's stack, `x` removes it (`magictree rm`, after a `y`: a dirty checkout is refused and
+the branch is kept), and `c` runs `magictree gc --all` to reclaim what gone ones left
+behind. Outside a repository the screen starts there. Without a terminal, a bare
+`magictree` prints the help instead.
 
 `up` prints a numbered step per unit of work. `up --quiet` keeps only the step headers,
 failures, and the URL summary; `up --verbose` streams a bootstrap command's output under its
