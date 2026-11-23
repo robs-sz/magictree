@@ -1,9 +1,9 @@
 //! The magictree mark, as a terminal draws it: the preface to `--help`, and the
 //! header of the TUI.
 //!
-//! `docs/logo.svg` is the same mark as an image, leading the wordmark; this is
-//! its three rows of half blocks, defined once so the help and the screen cannot
-//! drift apart.
+//! The mark is the `m` of the `magic` banner at the top of the README
+//! (`docs/banner.svg`), cut down to three rows of half blocks. It is defined
+//! once here so the help and the screen cannot drift apart.
 
 use std::io::IsTerminal;
 
