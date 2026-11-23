@@ -2,3 +2,6 @@
 
 # macOS
 .DS_Store
+
+# Logo sources and exports; what the README shows is copied into docs/.
+/assets
