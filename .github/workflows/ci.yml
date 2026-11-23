@@ -5,14 +5,14 @@ name: ci
 # three-platform release build says nothing a test run does not, and costs a
 # macOS runner for every commit.
 #
-# A change that cannot reach the binary — prose, the README's pictures — runs
-# nothing.
+# A change that cannot reach the binary — prose, the README's pictures, the
+# site — runs nothing here; pages.yml publishes the site.
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths-ignore: ["**.md", "docs/**", "site/**", "install.sh", "LICENSE"]
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths-ignore: ["**.md", "docs/**", "site/**", "install.sh", "LICENSE"]
   workflow_dispatch:
 
 permissions:

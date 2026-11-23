@@ -5,3 +5,9 @@
 
 # Logo sources and exports, kept local.
 /assets
+
+# The built site; site/build.py writes it.
+/site/_dist
+
+# Working files of the design tooling.
+/.taste-skill

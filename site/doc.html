@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{title}} · magictree</title>
+    <meta name="description" content="{{description}}" />
+    <link rel="icon" href="../assets/mark.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;600;700&display=swap" rel="stylesheet" /><!-- taste-skill-ignore: the terminal's face, for <pre> and <code> -->
+    <link rel="stylesheet" href="../styles.css" />
+  </head>
+  <body>
+    <header class="wrap">
+      <nav class="nav" aria-label="Main">
+        <a class="wordmark" href="../" aria-label="magictree, home">
+          <svg viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true">
+            <path d="M0 0h5v1H0zM0 1h1v3H0zM2 1h1v3H2zM4 1h1v3H4z" fill="#101410" />
+            <path d="M0 4h1v1H0zM2 4h1v1H2zM4 4h1v1H4z" fill="#5e8a00" />
+          </svg>
+          magictree
+        </a>
+        <ul>
+          <li class="keep"><a class="link" href="../">Overview</a></li>
+          <li><a class="link" href="https://github.com/robs-sz/magictree">GitHub</a></li>
+          <li><a class="button" href="../#install">Install</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <div class="wrap doc">
+      <nav class="doc__nav" aria-label="Documentation">
+        <ul>
+{{nav}}
+        </ul>
+      </nav>
+      <main class="prose">
+{{content}}
+      </main>
+    </div>
+
+    <footer class="foot">
+      <span>Per-worktree development stacks</span>
+      <ul>
+        <li><a class="link" href="../">Overview</a></li>
+        <li><a class="link" href="https://github.com/robs-sz/magictree">GitHub</a></li>
+        <li><a class="link" href="{{source}}">Edit this page</a></li>
+      </ul>
+      <span>MIT licence</span>
+    </footer>
+  </body>
+</html>

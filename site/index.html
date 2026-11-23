@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>magictree: a development stack for every git worktree</title>
+    <meta
+      name="description"
+      content="magictree gives every git worktree its own ports, environment and supervised processes, so several branches run side by side without colliding."
+    />
+    <meta property="og:title" content="magictree: a development stack for every git worktree" />
+    <meta
+      property="og:description"
+      content="Every git worktree gets its own ports, environment and supervised processes."
+    />
+    <meta property="og:type" content="website" />
+    <link rel="icon" href="assets/mark.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;600;700&display=swap" rel="stylesheet" /><!-- taste-skill-ignore: the terminal's face, for <pre> and <code> -->
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      document.documentElement.classList.add("js");
+    </script>
+  </head>
+  <body>
+    <header class="wrap">
+      <nav class="nav" aria-label="Main">
+        <a class="wordmark" href="./" aria-label="magictree, home">
+          <svg viewBox="0 0 5 5" shape-rendering="crispEdges" aria-hidden="true">
+            <path d="M0 0h5v1H0zM0 1h1v3H0zM2 1h1v3H2zM4 1h1v3H4z" fill="#101410" />
+            <path d="M0 4h1v1H0zM2 4h1v1H2zM4 4h1v1H4z" fill="#5e8a00" />
+          </svg>
+          magictree
+        </a>
+        <ul>
+          <li><a class="link" href="#how">How it works</a></li>
+          <li><a class="link" href="#commands">Commands</a></li>
+          <li class="keep"><a class="link" href="docs/worktrees.html">Docs</a></li>
+          <li><a class="link" href="https://github.com/robs-sz/magictree">GitHub</a></li>
+          <li><a class="button" href="#install">Install</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main>
+      <div class="wrap hero">
+        <div class="hero__text">
+          <h1 data-reveal>A stack for every worktree</h1>
+          <p class="hero__lead" data-reveal style="--i: 1">
+            magictree gives each git worktree its own ports, environment and supervised processes, so
+            several branches run side by side without colliding.
+          </p>
+          <div class="hero__actions" data-reveal style="--i: 2">
+            <a class="button" href="#install">Install magictree</a>
+            <a class="link" href="docs/worktrees.html">Read the docs</a>
+          </div>
+        </div>
+
+        <dl class="hero__facts" data-reveal style="--i: 3">
+          <div>
+            <dt>20</dt>
+            <dd>ports reserved for each worktree</dd>
+          </div>
+          <div>
+            <dt>0</dt>
+            <dd>files written into your checkout</dd>
+          </div>
+          <div>
+            <dt>1</dt>
+            <dd>manifest, committed once</dd>
+          </div>
+        </dl>
+
+        <div class="stage" data-reveal>
+          <div class="shutter">
+            <pre
+              class="term tui"
+              data-ui
+              id="tui"
+              tabindex="0"
+              role="application"
+              aria-label="The magictree screen, running on a sample repository. Use 1 to 5 to switch sections and the arrow keys to move."
+            >
+              <noscript>
+                <img
+                  src="assets/tui.svg"
+                  width="900"
+                  height="436"
+                  alt="The magictree screen: six services of the worktree shop-feat-billing with their state, port and URL"
+                />
+              </noscript>
+            </pre>
+          </div>
+        </div>
+      </div>
+
+      <section class="wrap" id="try">
+        <div class="demo-wrap">
+          <div class="demo-wrap__text">
+            <h2 class="section-head" data-reveal>Name a branch, get a stack</h2>
+            <p data-reveal style="--i: 1">
+              A worktree needs no configuration of its own. Type a branch name and see the checkout it
+              gets, the ports it is dealt and the URLs its services answer on.
+            </p>
+          </div>
+
+          <div class="demo" data-ui data-reveal style="--i: 2">
+            <pre class="term demo__out" id="demo-out" aria-live="polite"></pre>
+            <form class="demo__controls" id="demo-controls" onsubmit="return false">
+              <label class="control control--stack">
+                Branch
+                <input
+                  type="text"
+                  id="demo-branch"
+                  value="feat/billing"
+                  spellcheck="false"
+                  autocomplete="off"
+                  autocapitalize="off"
+                />
+              </label>
+              <label class="control">
+                web <input class="switch" type="checkbox" data-service="web" checked />
+              </label>
+              <label class="control">
+                api <input class="switch" type="checkbox" data-service="api" checked />
+              </label>
+              <label class="control">
+                db, in Compose <input class="switch" type="checkbox" data-service="db" checked />
+              </label>
+              <label class="control">
+                redis, in Compose <input class="switch" type="checkbox" data-service="redis" />
+              </label>
+              <label class="control">
+                Browser alias for web <input class="switch" type="checkbox" id="demo-alias" checked />
+              </label>
+              <label class="control">
+                Primary checkout <input class="switch" type="checkbox" id="demo-primary" />
+              </label>
+              <a class="link" href="docs/worktrees.html">How ports are dealt</a>
+            </form>
+          </div>
+
+          <p class="demo-wrap__foot">
+            The repository here is called shop. Blocks are twenty ports each, dealt from 20000 to 32767;
+            the block your worktree gets depends on the repository and on what is already taken.
+          </p>
+        </div>
+      </section>
+
+      <section class="wrap how" id="how">
+        <div class="how__aside">
+          <h2 class="section-head" data-reveal>From one checkout to many</h2>
+          <img
+            data-reveal
+            style="--i: 1"
+            src="assets/banner.svg"
+            width="536"
+            height="239"
+            alt="magic, drawn in ASCII characters, the feet of the m in green"
+            loading="lazy"
+          />
+        </div>
+
+        <div class="how__col">
+          <div data-reveal>
+            <p>
+              <strong>Once, in the primary checkout,</strong> magictree reads the repository (its
+              package scripts, Compose files, justfile and lockfiles) and writes what it found into a
+              manifest you commit. A worktree inherits only what git tracks, so the manifest is the
+              whole setup.
+            </p>
+            <pre class="term" data-ui><span class="dim">$</span> magictree discover &amp;&amp; magictree init
+<span class="dim">$</span> git add magictree.toml &amp;&amp; git commit -m "add magictree.toml"</pre>
+          </div>
+
+          <div data-reveal>
+            <p>
+              <strong>Then one command starts the stack.</strong> It claims the ports, runs the
+              bootstrap steps, starts the containers and the host processes in dependency order, and
+              waits for each one to be healthy before the next.
+            </p>
+            <pre class="term" data-ui><span class="dim">$</span> magictree up
+<b>[1/3] compose compose.yaml (project main) · db</b>
+     db: starting → healthy
+<b>[2/3] service · api</b>
+     api: started (pid 48190)
+     healthy
+<b>[3/3] service · web</b>
+     web: started (pid 48211)
+     healthy
+
+web   http://localhost:5173
+api   http://localhost:8000</pre>
+          </div>
+
+          <div data-reveal>
+            <p>
+              <strong>For each branch after that,</strong> a new worktree appears beside the checkout
+              with a stack of its own. The same service binds a different port in every checkout, and
+              nothing you start in one can take a port from another.
+            </p>
+            <pre class="term" data-ui><span class="dim">$</span> magictree new feat/billing
+<span class="dim">$</span> magictree list
+worktree           path                  ports
+shop-feat-billing  ../shop-feat-billing  db=24100 api=24101 web=24102
+shop-fix-checkout  ../shop-fix-checkout  db=27360 api=27361 web=27362</pre>
+          </div>
+
+          <div data-reveal>
+            <p>
+              <strong>When the branch is merged,</strong> removing the worktree stops its stack,
+              deletes the checkout and gives its ports back. The branch itself is kept, and nothing
+              is left behind for a later clean-up.
+            </p>
+            <pre class="term" data-ui><span class="dim">$</span> magictree rm feat/billing</pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" id="features">
+        <h2 class="section-head" data-reveal>What every worktree gets</h2>
+        <div class="cells">
+          <article class="cell" data-reveal>
+            <div class="cell__text">
+              <h3>Its own block of ports</h3>
+              <p>
+                Twenty ports per worktree, stable across restarts. The primary checkout keeps the
+                ports the repository already uses.
+              </p>
+            </div>
+            <pre class="term term--right" data-ui><span class="dim">$</span> magictree ports
+worktree shop-feat-billing (generated ports, block 24100-24119)
+db     24100  http://localhost:24100
+api    24101  http://localhost:24101
+web    24102  http://localhost:24102</pre>
+          </article>
+
+          <article class="cell cell--flip" data-reveal style="--i: 1">
+            <div class="cell__text">
+              <h3>A checkout that stays clean</h3>
+              <p>
+                Ports, environment, logs and pid files live in magictree's own state directory. No
+                file is written into the repository.
+              </p>
+            </div>
+            <pre class="term term--left" data-ui><span class="dim">$</span> git status --short
+<span class="dim">$</span> ls ~/.local/state/magictree/worktrees/*/shop-feat-billing
+env  log  ports.json  run</pre>
+          </article>
+
+          <article class="cell" data-reveal style="--i: 2">
+            <div class="cell__text">
+              <h3>One manifest for all of them</h3>
+              <p>
+                A service names its command, the variable its port arrives in, what it needs first
+                and how to tell it is up.
+              </p>
+            </div>
+            <pre class="term term--right" data-ui><span class="lime">[[services]]</span>
+id = <span class="green">"web"</span>
+target = { kind = <span class="green">"pnpm"</span>, script = <span class="green">"dev"</span> }
+port = { env = <span class="green">"PORT"</span>, prefer = 5173 }
+needs = [<span class="green">"db"</span>]
+health = { http = <span class="green">"/"</span>, timeout = 60 }</pre>
+          </article>
+
+          <article class="cell cell--flip" data-reveal>
+            <div class="cell__text">
+              <h3>A URL that names the branch</h3>
+              <p>
+                Mark a port as a browser alias and each worktree answers on its own hostname, so
+                cookies and tabs from two branches never mix.
+              </p>
+            </div>
+            <pre class="term term--left" data-ui>port = { env = <span class="green">"PORT"</span>, browser_alias = true }
+
+<span class="lime">http://shop-feat-billing.localhost:24102</span>
+<span class="lime">http://shop-fix-checkout.localhost:27362</span></pre>
+          </article>
+
+          <article class="cell" data-reveal style="--i: 1">
+            <div class="cell__text">
+              <h3>Containers and processes together</h3>
+              <p>
+                Compose services and plain commands are one stack with one dependency order, one
+                health check and one place to read their logs.
+              </p>
+            </div>
+            <pre class="term term--right" data-ui><span class="dim">$</span> magictree status
+db      compose  <span class="green">running (healthy)</span>
+redis   compose  <span class="green">running (healthy)</span>
+api     host     <span class="green">running (pid 48190)</span>
+web     host     <span class="green">running (pid 48211)</span>
+worker  host     <span class="dim">stopped</span></pre>
+          </article>
+
+          <article class="cell cell--flip" data-reveal style="--i: 2">
+            <div class="cell__text">
+              <h3>The same ports in your shell</h3>
+              <p>
+                One line in your rc file keeps the shell's environment in step with the worktree it
+                is in, for every tool and agent started from it.
+              </p>
+            </div>
+            <pre class="term term--left" data-ui><span class="dim">$</span> eval "$(magictree activate zsh)"
+<span class="dim">$</span> cd ../shop-feat-billing
+<span class="dim">$</span> echo $PORT
+24102</pre>
+          </article>
+        </div>
+      </section>
+
+      <section class="wrap" id="commands">
+        <div class="cmds__head">
+          <h2 class="section-head" data-reveal>
+            <span class="soft">Every key runs a command.</span><br />These are the commands.
+          </h2>
+          <a class="button" href="docs/commands.html" data-reveal style="--i: 1">Command reference</a>
+        </div>
+
+        <div class="cmds" data-reveal>
+          <div class="cmds__tabs" role="tablist" aria-label="Command groups">
+            <button class="cmds__tab" role="tab" id="tab-set-up" aria-controls="panel-set-up" aria-selected="true">Set up</button>
+            <button class="cmds__tab" role="tab" id="tab-run" aria-controls="panel-run" aria-selected="false" tabindex="-1">Run</button>
+            <button class="cmds__tab" role="tab" id="tab-look" aria-controls="panel-look" aria-selected="false" tabindex="-1">Look</button>
+            <button class="cmds__tab" role="tab" id="tab-worktrees" aria-controls="panel-worktrees" aria-selected="false" tabindex="-1">Worktrees</button>
+            <button class="cmds__tab" role="tab" id="tab-shell" aria-controls="panel-shell" aria-selected="false" tabindex="-1">Shell</button>
+          </div>
+
+          <div>
+            <div class="cmds__list" role="tabpanel" id="panel-set-up" aria-labelledby="tab-set-up">
+              <div class="band"><code>discover</code><div><strong>Read the repository</strong><span>Reports what a stack would need, from Compose files, package scripts, justfiles and lockfiles.</span></div><code>--json</code></div>
+              <div class="band"><code>init</code><div><strong>Write the manifest</strong><span>Asks only what it has not been told before, and never rewrites a service you edited.</span></div><code>--accept-defaults</code></div>
+              <div class="band"><code>doctor</code><div><strong>Detect drift</strong><span>Checks the manifests against what the repository says now.</span></div><code>-C &lt;dir&gt;</code></div>
+            </div>
+            <div class="cmds__list" role="tabpanel" id="panel-run" aria-labelledby="tab-run" hidden>
+              <div class="band"><code>up</code><div><strong>Start this worktree's stack</strong><span>Ports, bootstrap, services in dependency order, health.</span></div><code>--quiet · --no-build</code></div>
+              <div class="band"><code>down</code><div><strong>Stop it</strong><span>Volumes and ports are kept, so the next start is the same stack.</span></div><code>--volumes</code></div>
+              <div class="band"><code>restart</code><div><strong>Restart the services you name</strong><span>On the ports they already have; nothing else is touched.</span></div><code>--build</code></div>
+              <div class="band"><code>exec</code><div><strong>Run a command as the stack would</strong><span>With this worktree's ports and environment on top of your own.</span></div><code>-- just api::seed</code></div>
+            </div>
+            <div class="cmds__list" role="tabpanel" id="panel-look" aria-labelledby="tab-look" hidden>
+              <div class="band"><code>magictree</code><div><strong>The screen</strong><span>Services, worktrees, ports, environment and logs, with every action a key away.</span></div><code>no command</code></div>
+              <div class="band"><code>status</code><div><strong>What is running, and where</strong><span>Each service's process or container state and its URL.</span></div><code>--probe</code></div>
+              <div class="band"><code>logs</code><div><strong>A service's output</strong><span>One service, or the whole stack with Compose included.</span></div><code>-f · --all</code></div>
+              <div class="band"><code>ports</code><div><strong>This worktree's ports</strong><span>The assignment as URLs.</span></div><code>--release</code></div>
+              <div class="band"><code>env</code><div><strong>The resolved environment</strong><span>As a dotenv file, as exports, or with the layer that set each value.</span></div><code>--explain</code></div>
+            </div>
+            <div class="cmds__list" role="tabpanel" id="panel-worktrees" aria-labelledby="tab-worktrees" hidden>
+              <div class="band"><code>new</code><div><strong>Create a worktree and start its stack</strong><span>Beside the primary checkout, on a new or existing branch.</span></div><code>--no-up</code></div>
+              <div class="band"><code>list</code><div><strong>Worktrees and their ports</strong><span>For this repository, or every one magictree has recorded.</span></div><code>--all</code></div>
+              <div class="band"><code>rm</code><div><strong>Remove a worktree</strong><span>Stops it, deletes the checkout, releases its ports. The branch is kept.</span></div><code>--force</code></div>
+              <div class="band"><code>gc</code><div><strong>Reclaim what deleted checkouts left</strong><span>Port blocks, containers and processes of worktrees that are gone.</span></div><code>--all</code></div>
+            </div>
+            <div class="cmds__list" role="tabpanel" id="panel-shell" aria-labelledby="tab-shell" hidden>
+              <div class="band"><code>activate</code><div><strong>Keep a shell in step with its worktree</strong><span>For zsh, bash and fish.</span></div><code>--install</code></div>
+              <div class="band"><code>completion</code><div><strong>Shell completion</strong><span>A script for bash, zsh, fish, elvish or powershell.</span></div><code>zsh</code></div>
+              <div class="band"><code>update</code><div><strong>Install the latest release</strong><span>Over the running binary, only after the new one has proved it runs.</span></div><code>--check</code></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="install wrap" id="install">
+        <h2 class="visually-hidden">Install magictree</h2>
+        <p class="install__say" data-reveal>
+          Install magictree with
+          <code class="install__cmd" id="install-cmd">curl -fsSL https://raw.githubusercontent.com/robs-sz/magictree/main/install.sh | sh</code>
+          <button class="install__copy" id="install-copy" type="button" data-copied="copied">copy</button>
+        </p>
+        <p class="install__after" data-reveal style="--i: 1">
+          The script downloads the release built for your machine, checks that it runs, and puts one
+          binary in ~/.local/bin. Releases exist for macOS on Apple silicon and Intel and for Linux on
+          x86-64; the same archives are on the
+          <a href="https://github.com/robs-sz/magictree/releases">releases page</a>. After that,
+          magictree update keeps it current.
+        </p>
+        <figure class="install__shot" data-reveal style="--i: 2">
+          <img
+            src="assets/tui.png"
+            width="1800"
+            height="872"
+            alt="The magictree screen in a terminal: the services of the worktree shop-feat-billing, their state, port and URL, with web selected"
+            loading="lazy"
+          />
+        </figure>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <img
+        class="foot__banner"
+        src="assets/banner-dark.svg"
+        width="536"
+        height="239"
+        alt="magic, drawn in ASCII characters"
+        loading="lazy"
+      />
+      <span>Per-worktree development stacks</span>
+      <ul>
+        <li><a class="link" href="docs/worktrees.html">Docs</a></li>
+        <li><a class="link" href="https://github.com/robs-sz/magictree">GitHub</a></li>
+        <li><a class="link" href="https://github.com/robs-sz/magictree/releases">Releases</a></li>
+      </ul>
+      <span>MIT licence</span>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

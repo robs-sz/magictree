@@ -1,0 +1,48 @@
+name: pages
+
+# Builds the site in site/ and publishes it to GitHub Pages. The reference
+# pages are rendered from docs/*.md, so a change to either rebuilds it.
+#
+# Pages has to be switched on once for the repository, with "GitHub Actions"
+# as its source: Settings → Pages → Build and deployment → Source.
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "docs/**", "install.sh", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and a running one is allowed to finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the site
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet markdown
+          .venv/bin/python site/build.py _site
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v5
