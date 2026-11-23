@@ -65,8 +65,12 @@ def main() -> None:
     (out / "assets").mkdir(parents=True)
     (out / "docs").mkdir()
 
-    for name in ("index.html", "styles.css", "app.js"):
+    for name in ("styles.css", "app.js"):
         shutil.copy(SITE / name, out / name)
+    # The page shows the README's pictures straight from docs/, so it also
+    # works opened from the checkout; the published copy carries them itself.
+    index = (SITE / "index.html").read_text().replace('src="../docs/', 'src="assets/')
+    (out / "index.html").write_text(index)
     for asset in (SITE / "assets").iterdir():
         shutil.copy(asset, out / "assets" / asset.name)
     # The README's pictures are the site's pictures.
