@@ -380,7 +380,7 @@ pub struct EnvArgs {
 /// The command line as it is parsed: the derived `Cli::command` with the banner
 /// printed above its help.
 pub fn command() -> clap::Command {
-    Cli::command().before_help(banner::ART)
+    Cli::command().before_help(banner::preface())
 }
 
 /// Parse the command line, printing help or the error the way `Cli::parse` does.
