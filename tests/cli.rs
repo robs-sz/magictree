@@ -1034,6 +1034,10 @@ health = { http = "/", timeout = 60 }
 
 #[test]
 fn bootstrap_generates_files_before_services_start() {
+    if !have("just", &["--version"]) {
+        eprintln!("skipping: just not available");
+        return;
+    }
     // Mirrors the failure this guards against: a dev server importing a file
     // that a generation step has to produce first.
     let fixture = Fixture::new();
@@ -1074,6 +1078,10 @@ health = { http = "/", timeout = 30 }
 
 #[test]
 fn bootstrap_outputs_rerun_only_when_missing() {
+    if !have("just", &["--version"]) {
+        eprintln!("skipping: just not available");
+        return;
+    }
     // A generation step that declares what it produces runs when that artefact
     // is gone, and is skipped while it is still there.
     let fixture = Fixture::new();

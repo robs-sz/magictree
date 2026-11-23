@@ -772,6 +772,20 @@ fn relative_pointer(from_dir: &Path, to: &Path) -> String {
     parts.join("/")
 }
 
+/// The installed git's `(major, minor)`, or `(0, 0)` when it cannot be read.
+fn git_version() -> (u32, u32) {
+    let output = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+        .unwrap_or_default();
+    let mut numbers = output
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0))
+}
+
 /// A worktree's administrative `gitdir` pointer can be relative, which git
 /// writes with `worktree.useRelativePaths` and resolves against the
 /// administrative directory holding the file. Read against the directory the
@@ -780,6 +794,13 @@ fn relative_pointer(from_dir: &Path, to: &Path) -> String {
 /// for.
 #[test]
 fn list_names_a_worktree_git_registered_with_a_relative_path() {
+    // Relative pointers arrived with git 2.48. An older git reads one as a
+    // path it cannot find and drops the worktree from its own list, so there
+    // is nothing here for magictree to get right or wrong.
+    if git_version() < (2, 48) {
+        eprintln!("skipping: git older than 2.48 has no relative worktree pointers");
+        return;
+    }
     let fixture = Fixture::new();
     fixture.write(
         "magictree.toml",

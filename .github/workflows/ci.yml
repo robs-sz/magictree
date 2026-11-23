@@ -1,0 +1,55 @@
+name: ci
+
+# Every push and pull request is formatted and tested, once, on Linux. The
+# release binaries for each platform are built by release.yml, on a tag: a
+# three-platform release build says nothing a test run does not, and costs a
+# macOS runner for every commit.
+#
+# A change that cannot reach the binary — prose, the README's pictures — runs
+# nothing.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ github.workflow }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ github.workflow }}-
+
+      # Tests that drive a real tool skip themselves where it is missing, so
+      # the tools are installed here: a skipped test proves nothing.
+      - name: Install the tools the tests drive
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends just
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test --locked
